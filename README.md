@@ -57,6 +57,44 @@ Dependencies (`requests`, etc.) will be auto-detected and installed on first run
 
 **Timezone Consistency** — Compares your local `$TZ` environment variable (or system timezone) with the public IP's timezone. Mismatches increase the probability of being flagged as anomalous. Set `TZ` in your shell config to match your IP's IANA timezone (e.g., `America/Los_Angeles`).
 
+### MCP Server
+
+ip_check is also available as an MCP server, allowing Claude Code and Claude Desktop to call diagnostic tools directly.
+
+#### Install
+
+```bash
+pip install ip-check-mcp
+```
+
+#### Add to Claude Code
+
+```bash
+claude mcp add --transport stdio ip-check -- ip-check-mcp
+```
+
+#### Add to Claude Desktop
+
+Add the following to your Claude Desktop config file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "ip-check": {
+      "command": "ip-check-mcp"
+    }
+  }
+}
+```
+
+#### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `check_all` | Full diagnostic — IP, DNS, proxy, risk, timezone |
+| `check_ip_risk` | Check risk score for a specific IP address |
+| `check_dns` | Check DNS server configuration |
+
 ---
 
 ## 中文
@@ -107,6 +145,44 @@ python ip_check.py
 **IP 风险评估** — 检测 IP 是住宅还是机房类型。机房 IP 不一定有问题，但会进一步查询风险评分和滥用记录。如果风险评分偏高，建议更换节点。
 
 **时区一致性** — 对比本地 `$TZ` 环境变量（或系统时区）与公网 IP 所在时区。不一致会增加被 AI 服务识别为异常的概率。建议在 shell 配置中设置 `TZ` 为与 IP 所在地匹配的 IANA 时区（如 `America/Los_Angeles`）。
+
+### MCP Server
+
+ip_check 同时提供 MCP server，可以让 Claude Code 和 Claude Desktop 直接调用诊断工具。
+
+#### 安装
+
+```bash
+pip install ip-check-mcp
+```
+
+#### 添加到 Claude Code
+
+```bash
+claude mcp add --transport stdio ip-check -- ip-check-mcp
+```
+
+#### 添加到 Claude Desktop
+
+在 Claude Desktop 配置文件中添加（macOS 路径：`~/Library/Application Support/Claude/claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "ip-check": {
+      "command": "ip-check-mcp"
+    }
+  }
+}
+```
+
+#### 可用工具
+
+| 工具 | 说明 |
+|------|------|
+| `check_all` | 全量检测 — IP、DNS、代理、风险、时区 |
+| `check_ip_risk` | 查询指定 IP 的风险评分 |
+| `check_dns` | 检测 DNS 服务器配置 |
 
 ---
 
