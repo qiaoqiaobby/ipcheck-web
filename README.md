@@ -12,14 +12,14 @@ A lightweight diagnostic tool for AI developers to verify network environment co
 
 ### Why
 
-When using AI tools like Claude Code, OpenAI API, or Cursor, misconfigured network environments can lead to request failures, risk controls, or even account bans. Common issues include:
+To ensure AI tools like Claude Code, OpenAI API, and Cursor run smoothly and reliably, a properly configured network environment is essential. Common issues that may affect performance:
 
 - **IPv6 leaking real location** — Most proxies only handle IPv4; IPv6 can expose your actual geographic location
 - **DNS leakage** — Local DNS servers can reveal your true location to AI services
-- **High-risk IP** — Datacenter IPs or abused IPs are more likely to trigger risk controls
-- **Timezone mismatch** — Inconsistency between local timezone and IP geolocation increases anomaly detection probability
+- **High-risk IP** — Datacenter IPs or abused IPs may affect connection quality
+- **Timezone mismatch** — Inconsistency between local timezone and IP geolocation
 
-`ip_check` detects all these issues in one run, helping you verify your environment before using AI tools.
+`ip_check` detects all these issues in one run, ensuring your AI tools run smoothly and stably.
 
 ### Features
 
@@ -55,7 +55,7 @@ Dependencies (`requests`, etc.) will be auto-detected and installed on first run
 
 **IP Risk Assessment** — Identifies whether your IP is residential or datacenter. Datacenter IPs aren't necessarily problematic, but the tool will query risk scores and abuse records. Switch nodes if your risk score is high.
 
-**Timezone Consistency** — Compares your local `$TZ` environment variable (or system timezone) with the public IP's timezone. Mismatches increase the probability of being flagged as anomalous. Set `TZ` in your shell config to match your IP's IANA timezone (e.g., `America/Los_Angeles`).
+**Timezone Consistency** — Compares your local `$TZ` environment variable (or system timezone) with the public IP's timezone. Keeping them consistent ensures a better service experience. Set `TZ` in your shell config to match your IP's IANA timezone (e.g., `America/Los_Angeles`).
 
 ### MCP Server
 
@@ -101,14 +101,14 @@ Add the following to your Claude Desktop config file (`~/Library/Application Sup
 
 ### 为什么需要这个工具
 
-使用 Claude Code、OpenAI API、Cursor 等 AI 工具时，网络环境配置不当可能导致请求失败、账号风控甚至封禁。常见问题包括：
+想让 Claude Code、OpenAI API、Cursor 等 AI 工具流畅稳定运行，网络环境配置至关重要。以下问题可能影响使用体验：
 
 - **IPv6 泄露真实地址** — 代理通常只处理 IPv4，IPv6 会暴露你的实际位置
 - **DNS 泄露** — 使用国内 DNS 会暴露真实地理位置
-- **IP 风险过高** — 机房 IP 或被滥用的 IP 更容易触发风控
-- **时区不一致** — 本地时区配置与 IP 所在地不匹配，增加异常检测概率
+- **IP 风险过高** — 机房 IP 或被滥用的 IP 可能影响连接质量
+- **时区不一致** — 本地时区配置与 IP 所在地不匹配
 
-`ip_check` 一键检测这些问题，帮你在使用 AI 工具前排除隐患。
+`ip_check` 一键检测这些问题，确保你的 AI 工具流畅稳定运行。
 
 ### 功能
 
@@ -144,7 +144,7 @@ python ip_check.py
 
 **IP 风险评估** — 检测 IP 是住宅还是机房类型。机房 IP 不一定有问题，但会进一步查询风险评分和滥用记录。如果风险评分偏高，建议更换节点。
 
-**时区一致性** — 对比本地 `$TZ` 环境变量（或系统时区）与公网 IP 所在时区。不一致会增加被 AI 服务识别为异常的概率。建议在 shell 配置中设置 `TZ` 为与 IP 所在地匹配的 IANA 时区（如 `America/Los_Angeles`）。
+**时区一致性** — 对比本地 `$TZ` 环境变量（或系统时区）与公网 IP 所在时区。保持一致可以获得更好的服务体验。建议在 shell 配置中设置 `TZ` 为与 IP 所在地匹配的 IANA 时区（如 `America/Los_Angeles`）。
 
 ### MCP Server
 
@@ -186,6 +186,10 @@ claude mcp add --transport stdio ip-check -- ip-check-mcp
 
 ---
 
+## AI-Native Development
+
+> This MCP integration was built using Claude Code. From protocol definition to server implementation, the entire workflow was AI-augmented, demonstrating the power of the Model Context Protocol.
+
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE) © 2026 stormzhang
