@@ -33,7 +33,7 @@
 ## 安装
 
 ```bash
-pip install ipcheck
+pip install ai-ipcheck
 ```
 
 升级到最新版：

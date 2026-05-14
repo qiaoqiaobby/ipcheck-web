@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ipcheck"
+name = "ai-ipcheck"
 version = "0.1.0"
 description = "A lightweight diagnostic tool for AI developers to verify network environment compatibility and IP reputation."
 readme = "README.md"
@@ -27,6 +27,9 @@ dependencies = [
     "colorama; sys_platform == 'win32'",
     "tzdata; sys_platform == 'win32'",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ipcheck"]
 
 [project.scripts]
 ipcheck = "ipcheck.cli:main"

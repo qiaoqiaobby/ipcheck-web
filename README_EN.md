@@ -33,7 +33,7 @@ To ensure AI tools like Claude Code, OpenAI API, and Cursor run smoothly and rel
 ## Install
 
 ```bash
-pip install ipcheck
+pip install ai-ipcheck
 ```
 
 ## Usage
