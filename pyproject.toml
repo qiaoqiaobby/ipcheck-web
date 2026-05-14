@@ -35,5 +35,5 @@ packages = ["src/ipcheck"]
 ipcheck = "ipcheck.cli:main"
 
 [project.urls]
-Repository = "https://github.com/stormzhang/ip_check"
-Issues = "https://github.com/stormzhang/ip_check/issues"
+Repository = "https://github.com/stormzhang/ipcheck"
+Issues = "https://github.com/stormzhang/ipcheck/issues"
