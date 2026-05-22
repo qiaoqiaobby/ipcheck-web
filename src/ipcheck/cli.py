@@ -312,6 +312,92 @@ def get_proxy_envs():
     return seen
 
 
+def parse_macos_proxy(output):
+    config = {}
+    for line in output.splitlines():
+        if ':' not in line:
+            continue
+        key, value = line.split(':', 1)
+        config[key.strip()] = value.strip()
+
+    proxies = []
+    for name, prefix in [
+        ("HTTP", "HTTP"),
+        ("HTTPS", "HTTPS"),
+        ("SOCKS", "SOCKS"),
+    ]:
+        if config.get(f"{prefix}Enable") != "1":
+            continue
+        host = config.get(f"{prefix}Proxy")
+        port = config.get(f"{prefix}Port")
+        if host and port:
+            proxies.append(f"{name} {host}:{port}")
+
+    if config.get("ProxyAutoConfigEnable") == "1":
+        url = config.get("ProxyAutoConfigURLString")
+        proxies.append(f"PAC {url}" if url else "PAC 已启用")
+
+    return proxies
+
+
+def get_system_proxy():
+    if platform.system() != "Darwin":
+        return None
+    try:
+        r = subprocess.run(
+            ['scutil', '--proxy'], capture_output=True, text=True, timeout=3,
+        )
+        return parse_macos_proxy(r.stdout)
+    except Exception:
+        return None
+
+
+def parse_tun_vpn(ifconfig_output, route_output):
+    details = []
+    interfaces = set()
+
+    for match in re.finditer(r'^(utun\d*|tun\d*|tap\d*|wg\d*|ppp\d*):([\s\S]*?)(?=^\S|\Z)', ifconfig_output, re.MULTILINE):
+        name, block = match.groups()
+        interfaces.add(name)
+        ipv4 = re.search(r'\binet\s+(\d+\.\d+\.\d+\.\d+)', block)
+        if ipv4 and ipv4.group(1).startswith("198.18."):
+            details.append(f"{name} {ipv4.group(1)}")
+
+    for line in route_output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        gateway = parts[1]
+        netif = parts[-2] if parts[-1].isdigit() else parts[-1]
+        if netif in interfaces or netif.startswith(('utun', 'tun', 'tap', 'wg', 'ppp')):
+            item = f"{netif} 路由"
+            if item not in details:
+                details.append(item)
+        if gateway.startswith("198.18."):
+            item = f"{gateway} 代理网段"
+            if item not in details:
+                details.append(item)
+
+    return bool(details), details
+
+
+def get_tun_vpn_status():
+    if IS_WIN:
+        return None, []
+    try:
+        ifconfig_r = subprocess.run(
+            ['ifconfig'], capture_output=True, text=True, timeout=3,
+        )
+        if platform.system() == "Darwin":
+            route_cmd = ['netstat', '-rn', '-f', 'inet']
+        else:
+            route_cmd = ['ip', 'route']
+        route_r = subprocess.run(route_cmd, capture_output=True, text=True, timeout=3)
+        return parse_tun_vpn(ifconfig_r.stdout, route_r.stdout)
+    except Exception as e:
+        return None, [str(e)]
+
+
 def _utc_str(offset):
     total = int(offset.total_seconds())
     h, r  = divmod(abs(total), 3600)
@@ -402,6 +488,24 @@ def main():
             tbl_row(k, warn(v))
     else:
         tbl_row("环境变量代理", ok("未设置"))
+    system_proxy = get_system_proxy()
+    if system_proxy:
+        tbl_row("系统代理", warn(system_proxy[0]))
+        for item in system_proxy[1:]:
+            tbl_row("", warn(item))
+    elif system_proxy == []:
+        tbl_row("系统代理", ok("未设置"))
+    else:
+        tbl_row("系统代理", warn("暂不支持检测"))
+    tun_active, tun_details = get_tun_vpn_status()
+    if tun_active is True:
+        tbl_row("TUN / VPN", warn("疑似开启"))
+        for item in tun_details:
+            tbl_row("", warn(item))
+    elif tun_active is False:
+        tbl_row("TUN / VPN", ok("未检测到"))
+    else:
+        tbl_row("TUN / VPN", warn("无法检测"))
     if pub_ok:
         tbl_row("IP 标记为代理", bad("是 ✗") if pub.get("proxy")   else ok("否 ✓"))
         tbl_row("机房 / 托管",   bad("是 ✗") if pub.get("hosting") else ok("否 ✓"))

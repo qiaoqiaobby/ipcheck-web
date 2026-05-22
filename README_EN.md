@@ -24,7 +24,7 @@ To ensure AI tools like Claude Code, OpenAI API, and Cursor run smoothly and rel
 | LAN IP / IPv6 | Detect local IP, verify if IPv6 is disabled |
 | DNS Servers | Identify DNS origin (domestic/foreign), label known DNS providers |
 | Public IP Info | Exit IP, country, region, ISP, organization |
-| Proxy Detection | Env proxy settings, whether IP is flagged as proxy |
+| Proxy Detection | Env proxy settings, system proxy, TUN/VPN signals, whether IP is flagged as proxy |
 | IP Type | Residential vs. datacenter IP identification |
 | IP Risk Score | Risk scoring via proxycheck.io |
 | Abuse Records | IP abuse lookup via StopForumSpam |
@@ -52,6 +52,8 @@ ipcheck
 **LAN & DNS** — Disable IPv6 if possible. Most proxies don't handle IPv6 traffic, which may expose two IPs from different regions simultaneously. If a domestic DNS is detected, adjust DNS settings in your proxy software.
 
 **Public IP Info** — Shows your exit IP after proxy, including country/region, ISP, and timezone. These directly affect how AI services evaluate your request origin.
+
+**Proxy Detection** — `ipcheck` reports environment proxy variables, macOS system proxy settings, and TUN/VPN signals. System proxy status only describes OS configuration; it does not guarantee every CLI process inherits that proxy. Tools with sandboxing or separate network behavior, such as Codex or Claude Code, may need explicit `HTTP_PROXY` / `HTTPS_PROXY` settings, or TUN mode as a fallback.
 
 **IP Risk Assessment** — Identifies whether your IP is residential or datacenter. Datacenter IPs aren't necessarily problematic, but the tool will query risk scores and abuse records. Switch nodes if your risk score is high.
 
