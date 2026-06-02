@@ -507,8 +507,8 @@ def main():
     else:
         tbl_row("TUN / VPN", warn("无法检测"))
     if pub_ok:
-        tbl_row("IP 标记为代理", bad("是 ✗") if pub.get("proxy")   else ok("否 ✓"))
-        tbl_row("机房 / 托管",   bad("是 ✗") if pub.get("hosting") else ok("否 ✓"))
+        tbl_row("IP 标记为代理", warn("是 !") if pub.get("proxy")   else ok("否 ✓"))
+        tbl_row("机房 / 托管",   warn("是 !") if pub.get("hosting") else ok("否 ✓"))
         if (pub.get("hosting") or pub.get("proxy")) and pub_ip:
             risk_display, risk_score = get_ip_risk(pub_ip)
             tbl_row("IP 风险查询",  risk_display)
@@ -551,7 +551,7 @@ def main():
     else:
         conclusions.append(ok("✓ IPv6 已禁用，无泄露风险"))
     if dns_cn:
-        conclusions.append(bad("✗ DNS 使用国内服务商，暴露真实位置"))
+        conclusions.append(warn("! DNS 使用国内服务商，可能暴露真实位置"))
     elif not dns:
         conclusions.append(warn("- DNS 获取失败，无法评估"))
     else:
@@ -576,7 +576,7 @@ def main():
         conclusions.append(bad("✗ 时区不一致，建议调整"))
     else:
         conclusions.append(warn("- 时区无法比对"))
-    has_bad = (ipv6_leaked or dns_cn
+    has_bad = (ipv6_leaked
                or (risk_score is not None and risk_score >= 70)
                or tz_matched is False)
     tbl_row("结论分析", conclusions[0])
