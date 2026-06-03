@@ -29,6 +29,7 @@
 | IP 风险评分 | 通过 proxycheck.io 查询风险分数 |
 | 滥用记录 | 通过 StopForumSpam 查询 IP 是否被举报 |
 | 时区一致性 | 对比本地 CLI 时区与公网 IP 所在时区是否匹配 |
+| 综合结论 | 汇总各项风险，一句话判断当前环境 Claude 使用风险高低 |
 
 ## 安装
 
@@ -39,7 +40,7 @@ pip install ai-ipcheck
 升级到最新版：
 
 ```bash
-pip install --upgrade ipcheck
+pip install --upgrade ai-ipcheck
 ```
 
 ## 使用
@@ -64,6 +65,8 @@ ipcheck
 **IP 风险评估** — 检测 IP 是住宅还是机房类型。机房 IP 不一定有问题，但会进一步查询风险评分和滥用记录。如果风险评分偏高，建议更换节点。
 
 **时区一致性** — 对比本地 `$TZ` 环境变量（或系统时区）与公网 IP 所在时区。保持一致可以获得更好的服务体验。建议在 shell 配置中设置 `TZ` 为与 IP 所在地匹配的 IANA 时区（如 `America/Los_Angeles`）。
+
+**综合结论** — 报告末尾会汇总 IPv6、DNS、IP 风险、时区四项，给出一句话定论：当前环境 Claude 使用是「低风险」还是「高风险」。建议启动 Claude 前先看这一行。
 
 ## License
 

@@ -29,6 +29,7 @@ To ensure AI tools like Claude Code, OpenAI API, and Cursor run smoothly and rel
 | IP Risk Score | Risk scoring via proxycheck.io |
 | Abuse Records | IP abuse lookup via StopForumSpam |
 | Timezone Consistency | Compare local CLI timezone with public IP geolocation timezone |
+| Overall Verdict | Aggregates all checks into a one-line risk assessment for running Claude |
 
 ## Install
 
@@ -58,6 +59,8 @@ ipcheck
 **IP Risk Assessment** — Identifies whether your IP is residential or datacenter. Datacenter IPs aren't necessarily problematic, but the tool will query risk scores and abuse records. Switch nodes if your risk score is high.
 
 **Timezone Consistency** — Compares your local `$TZ` environment variable (or system timezone) with the public IP's timezone. Keeping them consistent ensures a better service experience. Set `TZ` in your shell config to match your IP's IANA timezone (e.g., `America/Los_Angeles`).
+
+**Overall Verdict** — At the end of the report, `ipcheck` aggregates the IPv6, DNS, IP risk, and timezone checks into a single bottom line: whether your current environment is low-risk or high-risk for running Claude. Check this line before launching Claude.
 
 ## License
 
