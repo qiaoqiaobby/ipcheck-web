@@ -1,6 +1,12 @@
 import unittest
 
-from ipcheck.cli import parse_macos_proxy, parse_tun_vpn
+from ipcheck.cli import (
+    C,
+    _ansi_wrap,
+    display_len,
+    parse_macos_proxy,
+    parse_tun_vpn,
+)
 
 
 class ProxyDetectionTests(unittest.TestCase):
@@ -84,6 +90,39 @@ default            192.168.31.1       UGScg                 en0
 
         self.assertFalse(active)
         self.assertEqual(details, [])
+
+
+class AnsiWrapTests(unittest.TestCase):
+    def test_short_value_unchanged(self):
+        self.assertEqual(_ansi_wrap("192.168.1.10", 46), ["192.168.1.10"])
+
+    def test_no_line_exceeds_width(self):
+        text = "Hangzhou Alibaba Advertising Co.,Ltd. China Mobile"
+        for ln in _ansi_wrap(text, 20):
+            self.assertLessEqual(display_len(ln), 20)
+
+    def test_breaks_on_space(self):
+        lines = _ansi_wrap("aaa bbb ccc", 7)
+        self.assertEqual(lines, ["aaa bbb", "ccc"])
+
+    def test_hard_break_long_token(self):
+        lines = _ansi_wrap("2001:4860:4860::8888", 8)
+        self.assertTrue(all(display_len(ln) <= 8 for ln in lines))
+        self.assertEqual("".join(lines), "2001:4860:4860::8888")
+
+    def test_cjk_width_respected(self):
+        # 每个汉字占 2 列，宽度 6 → 每行最多 3 个汉字
+        lines = _ansi_wrap("一二三四五", 6)
+        self.assertTrue(all(display_len(ln) <= 6 for ln in lines))
+
+    def test_color_preserved_across_wrap(self):
+        colored = f"{C.YELLOW}warn one two three four{C.RESET}"
+        lines = _ansi_wrap(colored, 9)
+        self.assertGreater(len(lines), 1)
+        for ln in lines:
+            if C.YELLOW:  # 仅在彩色启用时校验
+                self.assertIn(C.YELLOW, ln)
+                self.assertTrue(ln.endswith(C.RESET))
 
 
 if __name__ == "__main__":

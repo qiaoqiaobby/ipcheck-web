@@ -12,6 +12,7 @@ import sys
 import subprocess
 import datetime
 import re
+import shutil
 import platform
 
 import requests
@@ -149,20 +150,120 @@ def risk_color(score):
     return C.RED, "高风险"
 
 
-# ── 表格渲染 ──────────────────────────────────────────────
-COL_LABEL, COL_VALUE = 18, 46
+# ── 表格渲染（按终端宽度自适应）────────────────────────────
+COL_LABEL = 18
+MIN_VALUE = 16          # 值列最小显示宽度；再窄则退化为无边框模式
+MAX_VALUE = 46          # 宽终端下保持原有观感的上限
 
-def tbl_top(): print(f"  ╔{'═'*(COL_LABEL+2)}╤{'═'*(COL_VALUE+2)}╗")
-def tbl_sep(): print(f"  ╠{'═'*(COL_LABEL+2)}╪{'═'*(COL_VALUE+2)}╣")
-def tbl_bot(): print(f"  ╚{'═'*(COL_LABEL+2)}╧{'═'*(COL_VALUE+2)}╝")
+_LAYOUT = {"value": MAX_VALUE, "plain": False}
+
+
+def setup_layout():
+    """根据当前终端宽度确定值列宽度与渲染模式（输出被重定向时回退到 80 列）。"""
+    try:
+        width = shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        width = 80
+    avail = width - COL_LABEL - 9            # 除值列内容外的固定开销
+    if avail < MIN_VALUE:
+        _LAYOUT["plain"] = True
+        _LAYOUT["value"] = max(MIN_VALUE, width - 6)
+    else:
+        _LAYOUT["plain"] = False
+        _LAYOUT["value"] = min(MAX_VALUE, avail)
+
+
+def _ansi_wrap(s, width):
+    """按显示宽度折行，颜色跨行延续，优先在空格处断行。返回若干行字符串。"""
+    if width < 1:
+        width = 1
+    # 展开为 (字符, 该字符生效的颜色码)，跳过 ANSI 转义本身
+    cells, active, pos = [], "", 0
+    for m in ANSI_RE.finditer(s):
+        for ch in s[pos:m.start()]:
+            cells.append((ch, active))
+        active = "" if m.group() == C.RESET else m.group()
+        pos = m.end()
+    for ch in s[pos:]:
+        cells.append((ch, active))
+
+    # 贪心折行，记录最近空格作为断点
+    lines, cur, cur_w, last_space = [], [], 0, -1
+    for ch, color in cells:
+        w = char_width(ch)
+        if ch == ' ' and not cur:
+            continue                          # 行首跳过空格，避免续行出现前导空格
+        if cur_w + w > width and cur:
+            if ch == ' ':
+                lines.append(cur)             # 空格本身就是天然断点，丢弃它
+                cur, cur_w, last_space = [], 0, -1
+                continue
+            if last_space > 0:
+                lines.append(cur[:last_space])
+                cur = cur[last_space + 1:]
+                cur_w = sum(char_width(c) for c, _ in cur)
+            else:
+                lines.append(cur)
+                cur, cur_w = [], 0
+            last_space = -1
+        cur.append((ch, color))
+        cur_w += w
+        if ch == ' ':
+            last_space = len(cur) - 1
+    if cur:
+        lines.append(cur)
+    if not lines:
+        return [""]
+
+    # 渲染回带颜色的字符串，每行末尾补 RESET
+    out = []
+    for line in lines:
+        buf, cur_color = [], ""
+        for ch, color in line:
+            if color != cur_color:
+                buf.append(color or C.RESET)
+                cur_color = color
+            buf.append(ch)
+        if cur_color:
+            buf.append(C.RESET)
+        out.append("".join(buf))
+    return out
+
+
+def tbl_top():
+    if _LAYOUT["plain"]:
+        return
+    print(f"  ╔{'═'*(COL_LABEL+2)}╤{'═'*(_LAYOUT['value']+2)}╗")
+
+
+def tbl_sep():
+    if _LAYOUT["plain"]:
+        print()
+        return
+    print(f"  ╠{'═'*(COL_LABEL+2)}╪{'═'*(_LAYOUT['value']+2)}╣")
+
+
+def tbl_bot():
+    if _LAYOUT["plain"]:
+        return
+    print(f"  ╚{'═'*(COL_LABEL+2)}╧{'═'*(_LAYOUT['value']+2)}╝")
 
 
 def tbl_row(label, value):
-    value = str(value)
-    lpad = ' ' * max(0, COL_LABEL - display_len(label))
-    vpad = ' ' * max(0, COL_VALUE - display_len(value))
-    lstr = f"{label}{lpad}" if label else ' ' * COL_LABEL
-    print(f"  ║ {lstr} │ {value}{vpad} ║")
+    lines = _ansi_wrap(str(value), _LAYOUT["value"])
+    if _LAYOUT["plain"]:
+        if label:
+            print(f"  {label}")
+        for ln in lines:
+            print(f"      {ln}")
+        return
+    v = _LAYOUT["value"]
+    for i, ln in enumerate(lines):
+        lbl = label if i == 0 else ""
+        lpad = ' ' * max(0, COL_LABEL - display_len(lbl))
+        vpad = ' ' * max(0, v - display_len(ln))
+        lstr = f"{lbl}{lpad}" if lbl else ' ' * COL_LABEL
+        print(f"  ║ {lstr} │ {ln}{vpad} ║")
 
 
 # ── 数据采集 ─────────────────────────────────────────────
@@ -434,6 +535,7 @@ def main():
         print(f"ipcheck {__version__}")
         return
 
+    setup_layout()
     pub = get_public_info()
     pub_ok = pub.get("status") == "success"
 
