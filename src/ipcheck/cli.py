@@ -287,6 +287,7 @@ def _macos_manual_dns():
 
 
 def get_dns_servers():
+    """返回 DNS 服务器列表（去重保序）。各分支只管收集，末尾统一去重。"""
     servers = []
     if IS_WIN:
         try:
@@ -296,16 +297,13 @@ def get_dns_servers():
                  'Select-Object -ExpandProperty ServerAddresses'],
                 capture_output=True, text=True, timeout=5, encoding='utf-8',
             )
-            seen = set()
             for line in r.stdout.splitlines():
                 ip = line.strip()
                 if not ip:
                     continue
                 try:
                     ipaddress.ip_address(ip)
-                    if ip not in seen:
-                        seen.add(ip)
-                        servers.append(ip)
+                    servers.append(ip)
                 except ValueError:
                     pass
         except Exception:
@@ -317,14 +315,10 @@ def get_dns_servers():
             if manual:
                 return manual
         try:
-            seen = set()
             with open('/etc/resolv.conf') as f:
                 for line in f:
                     if line.strip().startswith('nameserver'):
-                        ip = line.split()[1]
-                        if ip not in seen:
-                            seen.add(ip)
-                            servers.append(ip)
+                        servers.append(line.split()[1])
         except Exception:
             pass
         if not servers:
@@ -332,17 +326,13 @@ def get_dns_servers():
                 r = subprocess.run(
                     ['scutil', '--dns'], capture_output=True, text=True, timeout=3,
                 )
-                seen = set()
                 for line in r.stdout.splitlines():
                     line = line.strip()
                     if line.startswith('nameserver['):
-                        ip = line.split(':', 1)[1].strip()
-                        if ip not in seen:
-                            seen.add(ip)
-                            servers.append(ip)
+                        servers.append(line.split(':', 1)[1].strip())
             except Exception:
                 pass
-    return servers
+    return list(dict.fromkeys(servers))
 
 
 def get_public_info():
@@ -377,7 +367,7 @@ def get_ip_risk(ip):
         if itype:
             parts.append(f"类型 {itype}")
         if proxy == "yes":
-            parts.append(bad("已标记为代理"))
+            parts.append(warn("已标记为代理"))
         display = "  ".join(parts) if parts else warn("暂无数据")
         return display, score
     except Exception as e:
@@ -556,6 +546,36 @@ def get_cli_tz_name():
     return name, False
 
 
+def tz_display(name):
+    """IANA 时区名 → 'name  (UTC±HH:MM)'；无法解析则原样返回，空则 None。"""
+    if not name:
+        return None
+    zi = make_zone(name)
+    if zi:
+        return f"{name}  ({_utc_str(datetime.datetime.now(zi).utcoffset())})"
+    return name
+
+
+def _tz_match(local_name, exit_name):
+    """本地时区 vs 出口 IP 时区是否一致：先比 IANA 名，名不同再比 UTC offset。
+    一致 True / 不一致 False / 无法比对 None。"""
+    if not local_name or not exit_name:
+        return None
+    if local_name == exit_name:
+        return True
+    lz, ez = make_zone(local_name), make_zone(exit_name)
+    if lz and ez:
+        return datetime.datetime.now(lz).utcoffset() == datetime.datetime.now(ez).utcoffset()
+    return None
+
+
+def _tz_verdict(matched):
+    """一致 → 绿；不一致 → 红；无法比对 → 黄。"""
+    if matched is None:
+        return warn("无法比对")
+    return ok("一致") if matched else bad("不一致")
+
+
 # ── Claude 检测 ──────────────────────────────────────────
 def get_claude_base_url():
     """CLI 的 ANTHROPIC_BASE_URL：shell 环境变量优先，再读 ~/.claude/settings.json 的 env。
@@ -686,16 +706,7 @@ def main():
         tbl_row("城市",              _val(pub.get("city")))
         tbl_row("运营商", _val(pub.get("isp")))
         tbl_row("IP 归属",           _val(pub.get("org")))
-        pub_tz_name = pub.get("timezone")
-        if pub_tz_name:
-            zi = make_zone(pub_tz_name)
-            if zi:
-                off = datetime.datetime.now(zi).utcoffset()
-                tbl_row("所处时区", f"{pub_tz_name}  ({_utc_str(off)})")
-            else:
-                tbl_row("所处时区", pub_tz_name)
-        else:
-            tbl_row("所处时区", _val(None))
+        tbl_row("所处时区", tz_display(pub.get("timezone")) or _val(None))
     else:
         tbl_row("公网请求", bad(pub.get("message") or "未知错误"))
 
@@ -706,25 +717,24 @@ def main():
     proxy_envs = get_proxy_envs()
     if proxy_envs:
         for k, v in proxy_envs.items():
-            tbl_row(k, warn(v))
+            tbl_row(k, ok(v))
     else:
-        tbl_row("环境变量代理", ok("未设置"))
+        tbl_row("环境变量代理", warn("未设置"))
     system_proxy = get_system_proxy()
     if system_proxy:
-        tbl_row("系统代理", warn("已开启"))
+        tbl_row("系统代理", ok("已开启"))
     elif system_proxy == []:
-        tbl_row("系统代理", ok("未设置"))
+        tbl_row("系统代理", warn("未开启"))
     else:
         tbl_row("系统代理", warn("暂不支持检测"))
     tun_active, _ = get_tun_vpn_status()
     if tun_active is True:
-        tbl_row("TUN / VPN", warn("疑似开启"))
+        tbl_row("TUN / VPN", ok("疑似开启"))
     elif tun_active is False:
-        tbl_row("TUN / VPN", ok("未检测到"))
+        tbl_row("TUN / VPN", warn("未检测到"))
     else:
         tbl_row("TUN / VPN", warn("无法检测"))
     if pub_ok:
-        tbl_row("IP 标记为代理", warn("是") if pub.get("proxy")   else ok("否"))
         tbl_row("机房 / 住宅",   warn("机房 IP") if pub.get("hosting") else ok("住宅 IP"))
         if (pub.get("hosting") or pub.get("proxy")) and pub_ip:
             risk_display, risk_score = get_ip_risk(pub_ip)
@@ -738,40 +748,22 @@ def main():
 
     # 时区
     tz_matched = None
-    cli_dt     = datetime.datetime.now().astimezone()
-    cli_offset = cli_dt.utcoffset()
+    cli_offset = datetime.datetime.now().astimezone().utcoffset()
 
     sys_tz = get_system_tz()
-    if sys_tz:
-        sys_zi = make_zone(sys_tz)
-        if sys_zi:
-            sys_off = datetime.datetime.now(sys_zi).utcoffset()
-            tbl_row("系统时区", f"{sys_tz}  ({_utc_str(sys_off)})")
-        else:
-            tbl_row("系统时区", sys_tz)
-    else:
-        tbl_row("系统时区", warn("未知"))
+    tbl_row("系统时区", tz_display(sys_tz) or warn("未知"))
 
-    tz_name, is_iana = get_cli_tz_name()
+    tz_name, _ = get_cli_tz_name()
     tbl_row("CLI 时区", f"{tz_name}  ({_utc_str(cli_offset)})")
 
     pub_tz_name = pub.get("timezone") if pub_ok else None
     if pub_tz_name:
-        pub_zi     = make_zone(pub_tz_name)
-        pub_offset = datetime.datetime.now(pub_zi).utcoffset() if pub_zi else None
-
-        if is_iana:
-            tz_matched = tz_name == pub_tz_name
-            match = ok("一致") if tz_matched else bad("不一致")
-        elif pub_offset is not None:
-            tz_matched = cli_offset == pub_offset
-            if tz_matched:
-                match = warn("UTC 偏移一致（建议设置 $TZ=IANA 名称精确比对）")
-            else:
-                match = bad("不一致（UTC 偏移不同）")
-        else:
-            match = warn("无法比对（tzdata 未安装？pip install tzdata）")
-        tbl_row("时区一致性", match)
+        # CC CLI 认 $TZ → 比 CLI 时区；桌面版不认 $TZ、走系统时区 → 比系统时区
+        cli_m = _tz_match(tz_name, pub_tz_name)
+        sys_m = _tz_match(sys_tz, pub_tz_name)
+        tz_matched = cli_m  # 综合结论以 CC CLI 为准（本工具主要面向 CC CLI 用户）
+        tbl_row("时区一致性", f"CC CLI：{_tz_verdict(cli_m)}")
+        tbl_row("", f"桌面版：{_tz_verdict(sys_m)}")
 
     tbl_sep()
 
