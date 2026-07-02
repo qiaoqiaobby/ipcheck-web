@@ -5,14 +5,14 @@
 
 ## 当前阶段
 
-已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,**已发布版本 0.3.0**(2026-07-01,PyPI 已上线 https://pypi.org/project/ai-ipcheck/0.3.0/ )。本轮相较 0.2.1 做了主面板大改(字段语义重构 + 新增 Claude 检测块 + 综合结论三档风险 + 渲染修对齐/窄终端自适应,详见「最近验证」),已全部提交并发布;**尚未 push 到 origin**。同日另有附属独立脚本 `claude_expose_check.py`(Claude Code 暴露自检):因反蒸馏水印已在 2.1.198 移除,「水印自检 / 文本反向检测」两块已失效,**决定暂保留该文件**(不删不并入),主要留「遥测状态 / 服务端可见参数 / 敏感信息暴露」三块之后可能有用的逻辑,已在文件头和 CLAUDE.md 备注状态。当前重心:主面板改动待提交/发版、完善公开文档。字段语义以 `CLAUDE.md`「面板结构与字段语义」为准。
+已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,**已发布版本 0.3.1**(2026-07-02,PyPI 已上线 https://pypi.org/project/ai-ipcheck/0.3.1/ )。0.3.0 起做了主面板大改(字段语义重构 + 新增 Claude 检测块 + 综合结论三档风险 + 渲染修对齐/窄终端自适应),0.3.1 补了环境变量代理开关式展示 + 「检测建议」改名 + 综合结论单独成块(详见「最近验证」)。**版本号 commit 与 ROADMAP 记录尚未 push 到 origin**。同日另有附属独立脚本 `claude_expose_check.py`(Claude Code 暴露自检):因反蒸馏水印已在 2.1.198 移除,「水印自检 / 文本反向检测」两块已失效,**决定暂保留该文件**(不删不并入),主要留「遥测状态 / 服务端可见参数 / 敏感信息暴露」三块之后可能有用的逻辑,已在文件头和 CLAUDE.md 备注状态。当前重心:主面板改动待提交/发版、完善公开文档。字段语义以 `CLAUDE.md`「面板结构与字段语义」为准。
 
 ## 已完成(已实现且已验证)
 
 > 说明:已发布到 PyPI 且 README 配有运行截图(`screenshot.png`),核心命令可运行可视为已验证;但仓库内未见自动化测试或运行日志沉淀,以下条目以「已发布 + 截图证据」为依据。
 
 - 单模块 CLI 工具落地:`src/ipcheck/cli.py` 集中全部逻辑,`pyproject.toml` 注册 `ipcheck` 命令,`python -m ipcheck` 入口可用
-- 已发布到 PyPI:包名 `ai-ipcheck`(`ipcheck` 被占),CLI 命令名 `ipcheck`,版本号到 **0.3.0**
+- 已发布到 PyPI:包名 `ai-ipcheck`(`ipcheck` 被占),CLI 命令名 `ipcheck`,版本号到 **0.3.1**
 - 公网信息检测:经 ip-api.com 获取出口 IP、国家/省份/城市、ISP、组织、代理/托管标记、公网时区
 - 本机网络检测:局域网 IPv4、IPv6 可用性、DNS 服务器(Windows/Unix/macOS 分别处理)及 DNS 服务商标注
 - 代理检测:环境变量代理(HTTP_PROXY/HTTPS_PROXY/ALL_PROXY)、macOS 系统代理(scutil)、TUN/VPN 启发式判断
@@ -44,6 +44,7 @@
 
 ## 最近验证
 
+- 2026-07-02 — **发布 0.3.1 到 PyPI**：版本号两处同步升 0.3.0 → 0.3.1，`python -m build` 打包 + `twine check` 双产物 PASSED + `twine upload` 上线，`/pypi/ai-ipcheck/0.3.1/json` 返回 HTTP 200、版本 0.3.1、whl + tar.gz 均在。本次含环境变量代理开关式展示、「检测建议」改名 + 综合结论单独成块。https://pypi.org/project/ai-ipcheck/0.3.1/ 。git 已提交至版本号 commit，**尚未 push 到 origin**
 - 2026-07-02 — **「结论和建议」改名「检测建议」+ 综合结论单独成块**：label 由「结论和建议」改为「检测建议」；在检测建议与综合结论之间加 `tbl_sep()`，综合结论单独成一块（原为同块无分隔线）。mock 面板验证通过。字段语义已同步 CLAUDE.md ⑥
 - 2026-07-02 — **环境变量代理展示统一**：原逻辑设了代理就逐行列出变量名 + 代理地址（暴露 `127.0.0.1:7890` 端口，且与系统代理/TUN 的开关式展示不一致），改为固定一行「已设置（绿）/ 未设置（黄）」，三个代理项展示彻底统一、不再泄露地址，兑现 CLAUDE.md ③「只显示开关状态、三项统一」。mock 面板验证通过
 - 2026-07-02 — **合并远端 442bac4 并推送**：push 时发现远端有一个本地缺失的 commit（`442bac4` 表格渲染自适应，与本地 `fit_width` 功能重复、分叉冲突）。按决策 `git merge -s ours origin/main` 保留本地渲染、丢弃远端 plain 模式与单测，校验 merge 后 `cli.py` 仍为本地版（COL_LABEL=20 / fit_width）、`tests` 无 AnsiWrapTests，随后 push origin/main。远端渲染增强转入「待办」备查
