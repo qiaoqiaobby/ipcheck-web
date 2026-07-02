@@ -726,8 +726,7 @@ def main():
     risk_score = None
     proxy_envs = get_proxy_envs()
     if proxy_envs:
-        for k, v in proxy_envs.items():
-            tbl_row(k, ok(v))
+        tbl_row("环境变量代理", ok("已设置"))
     else:
         tbl_row("环境变量代理", warn("未设置"))
     system_proxy = get_system_proxy()
@@ -804,7 +803,7 @@ def main():
                 tbl_row("Anthropic 147 黑名单", ok("未命中"))
 
     tbl_sep()
-    # 结论和建议：综合判定 + 只列可优化项（非绿色），正常项不提
+    # 检测建议：只列可优化项（非绿色），正常项不提；综合结论另起一块
     suggestions = []
     if ipv6_leaked:
         suggestions.append(bad("! IPv6 泄露，暴露真实地址，建议禁用"))
@@ -831,12 +830,13 @@ def main():
         suggestions.append(bad("! 中转端点命中 Anthropic 黑名单，封号风险高，建议改官方直连或国产大模型"))
 
     if suggestions:
-        tbl_row("结论和建议", suggestions[0])
+        tbl_row("检测建议", suggestions[0])
         for s in suggestions[1:]:
             tbl_row("", s)
     else:
-        tbl_row("结论和建议", ok("各项正常，暂无可优化项"))
+        tbl_row("检测建议", ok("各项正常，暂无可优化项"))
 
+    tbl_sep()
     has_bad = ((risk_score is not None and risk_score >= 70)
                or blacklist_matched)
     has_mid = (tz_matched is False

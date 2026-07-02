@@ -44,6 +44,8 @@
 
 ## 最近验证
 
+- 2026-07-02 — **「结论和建议」改名「检测建议」+ 综合结论单独成块**：label 由「结论和建议」改为「检测建议」；在检测建议与综合结论之间加 `tbl_sep()`，综合结论单独成一块（原为同块无分隔线）。mock 面板验证通过。字段语义已同步 CLAUDE.md ⑥
+- 2026-07-02 — **环境变量代理展示统一**：原逻辑设了代理就逐行列出变量名 + 代理地址（暴露 `127.0.0.1:7890` 端口，且与系统代理/TUN 的开关式展示不一致），改为固定一行「已设置（绿）/ 未设置（黄）」，三个代理项展示彻底统一、不再泄露地址，兑现 CLAUDE.md ③「只显示开关状态、三项统一」。mock 面板验证通过
 - 2026-07-02 — **合并远端 442bac4 并推送**：push 时发现远端有一个本地缺失的 commit（`442bac4` 表格渲染自适应，与本地 `fit_width` 功能重复、分叉冲突）。按决策 `git merge -s ours origin/main` 保留本地渲染、丢弃远端 plain 模式与单测，校验 merge 后 `cli.py` 仍为本地版（COL_LABEL=20 / fit_width）、`tests` 无 AnsiWrapTests，随后 push origin/main。远端渲染增强转入「待办」备查
 - 2026-07-01 — **发布 0.3.0 到 PyPI**：版本号两处（`__init__.py` / `pyproject.toml`）同步升 0.2.1 → 0.3.0，`python -m build` 打包 + `twine check` 双产物 PASSED + `twine upload` 上线 https://pypi.org/project/ai-ipcheck/0.3.0/ 。本次为累积发布（含面板大改、Claude 检测块、综合结论三档风险、`claude_expose_check` 暴露自检脚本）。git 已提交至版本号 commit `811f136`，**尚未 push 到 origin**（本地领先 origin/main 6 个 commit）
 - 2026-07-01 — **综合结论改三档 高/中/低（本地跑通，未提交）**：在原「高/低」之间加**中风险**。`has_bad`（高，红）= IP 风险分≥70 / 命中黑名单；`has_mid`（中，黄，仅非高时判）= CLI 时区不一致 / 出口节点有投诉 / 没开 TUN，任一命中即中风险；都不命中才低风险。为拿「出口节点有投诉」信号，`get_stopforumspam()` 加第二返回值 `appears`（bool）。实测：时区不一致→中风险（黄）；命中黑名单+时区不一致→高风险（高优先于中）；当前环境（TUN 开、时区一致、未收录、66 分）→低风险。字段语义已同步 `CLAUDE.md` ⑥
