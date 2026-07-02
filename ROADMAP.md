@@ -31,6 +31,7 @@
 
 ## 待办
 
+- **远端 442bac4 的更完善渲染未采用**（可后续捞回）：6/14 在另一台机器开发的「表格渲染按终端宽度自适应」含 plain 极窄退化（`<43` 列退化无边框列表，不破版）+ 6 个 `AnsiWrapTests` 单测；本次因与本地 `fit_width` 功能重复，按决策 `merge -s ours` 保留本地版、丢弃该 commit 内容。如需极窄终端不破版保护或补渲染单测，可从 `442bac4` 手动捞回（注意 `COL_LABEL` 需保持 20 以适配「Anthropic 147 黑名单」长 label）
 - `claude_expose_check.py` 是否并入主命令做 `ipcheck claude` 子命令(复用 `tbl_*` 表格渲染 + `IS_WIN` 跨平台逻辑);若并入需同步升版本、改 README。待主人确认方向
 - `claude_expose_check.py` 二级兜底:当前二进制找不到时回退名单仅 `["cn"]`(域名匹配退化);可选嵌入 147+11 快照做兜底,便于「没装 Claude 也能用」,代价是快照会随版本过期。待主人确认是否需要
 - 完善 MCP 使用体验与公开文档(来自 projects.json 的 nextStep;注意:MCP server 已于 commit 16bf65f 移除并重构为纯 CLI,此 nextStep 与当前代码状态不一致,需主人确认方向是否仍要 MCP)
@@ -43,6 +44,7 @@
 
 ## 最近验证
 
+- 2026-07-02 — **合并远端 442bac4 并推送**：push 时发现远端有一个本地缺失的 commit（`442bac4` 表格渲染自适应，与本地 `fit_width` 功能重复、分叉冲突）。按决策 `git merge -s ours origin/main` 保留本地渲染、丢弃远端 plain 模式与单测，校验 merge 后 `cli.py` 仍为本地版（COL_LABEL=20 / fit_width）、`tests` 无 AnsiWrapTests，随后 push origin/main。远端渲染增强转入「待办」备查
 - 2026-07-01 — **发布 0.3.0 到 PyPI**：版本号两处（`__init__.py` / `pyproject.toml`）同步升 0.2.1 → 0.3.0，`python -m build` 打包 + `twine check` 双产物 PASSED + `twine upload` 上线 https://pypi.org/project/ai-ipcheck/0.3.0/ 。本次为累积发布（含面板大改、Claude 检测块、综合结论三档风险、`claude_expose_check` 暴露自检脚本）。git 已提交至版本号 commit `811f136`，**尚未 push 到 origin**（本地领先 origin/main 6 个 commit）
 - 2026-07-01 — **综合结论改三档 高/中/低（本地跑通，未提交）**：在原「高/低」之间加**中风险**。`has_bad`（高，红）= IP 风险分≥70 / 命中黑名单；`has_mid`（中，黄，仅非高时判）= CLI 时区不一致 / 出口节点有投诉 / 没开 TUN，任一命中即中风险；都不命中才低风险。为拿「出口节点有投诉」信号，`get_stopforumspam()` 加第二返回值 `appears`（bool）。实测：时区不一致→中风险（黄）；命中黑名单+时区不一致→高风险（高优先于中）；当前环境（TUN 开、时区一致、未收录、66 分）→低风险。字段语义已同步 `CLAUDE.md` ⑥
 - 2026-07-01 — **`has_bad` 收窄为两条（本地跑通，未提交）**：移出「IPv6 泄露」「时区不一致」，综合高风险**只认** IP 风险分≥70 / 中转命中 147 黑名单。IPv6 与时区仍在「结论和建议」里红字提示，但不再拉高综合结论。实测当前环境（66 分中风险、无黑名单、时区一致）综合结论判低风险
