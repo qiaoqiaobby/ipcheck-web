@@ -383,7 +383,7 @@ def get_stopforumspam(ip):
         )
         data = resp.json().get("ip", {})
         if not data.get("appears"):
-            return [ok("未收录  低风险")]
+            return [ok("未收录  低风险")], False
         confidence = float(data.get("confidence", 0))
         frequency  = int(data.get("frequency", 0))
         last_seen  = (data.get("lastseen") or "")[:10]
@@ -391,9 +391,9 @@ def get_stopforumspam(ip):
         lines = [f"{color}{confidence:.1f}/100 {level}{C.RESET}  举报 {frequency} 次"]
         if last_seen:
             lines.append(f"最近举报 {last_seen}")
-        return lines
+        return lines, True
     except Exception as e:
-        return [warn(f"查询失败（{e}）")]
+        return [warn(f"查询失败（{e}）")], False
 
 
 def get_proxy_envs():
@@ -597,6 +597,16 @@ def get_claude_base_url():
     return None, None
 
 
+def claude_installed():
+    """本机是否装过 / 用过 Claude Code：配置目录、配置文件或二进制任一存在即算。"""
+    cfgdir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    if os.path.isdir(cfgdir):
+        return True
+    if os.path.exists(os.path.expanduser("~/.claude.json")):
+        return True
+    return bool(shutil.which("claude"))
+
+
 def is_official_base(url):
     """未设 或 host（含端口）== api.anthropic.com 视为官方（复刻 CC 的 Crt/Rrt）。"""
     if not url:
@@ -734,12 +744,13 @@ def main():
         tbl_row("TUN / VPN", warn("未检测到"))
     else:
         tbl_row("TUN / VPN", warn("无法检测"))
+    spam_listed = False
     if pub_ok:
         tbl_row("机房 / 住宅",   warn("机房 IP") if pub.get("hosting") else ok("住宅 IP"))
         if (pub.get("hosting") or pub.get("proxy")) and pub_ip:
             risk_display, risk_score = get_ip_risk(pub_ip)
             tbl_row("IP 风险查询",  risk_display)
-            spam_lines = get_stopforumspam(pub_ip)
+            spam_lines, spam_listed = get_stopforumspam(pub_ip)
             tbl_row("垃圾滥用记录", spam_lines[0])
             for line in spam_lines[1:]:
                 tbl_row("", line)
@@ -768,9 +779,13 @@ def main():
     tbl_sep()
 
     # Claude 检测（CLI）
+    blacklist_matched = False
     claude_url, claude_src = get_claude_base_url()
     if not claude_url:
-        tbl_row("CLI 端点", ok("官方直连（未设 ANTHROPIC_BASE_URL）"))
+        if claude_installed():
+            tbl_row("CLI 端点", ok("官方直连（未设 ANTHROPIC_BASE_URL）"))
+        else:
+            tbl_row("CLI 端点", warn("未检测到 Claude Code（未安装或未使用）"))
     elif is_official_base(claude_url):
         tbl_row("CLI 端点", ok("官方直连（api.anthropic.com）"))
     else:
@@ -783,6 +798,7 @@ def main():
             tbl_row("", bad("疑似中转，注意数据泄露风险"))
             hit = blacklist_hit(claude_host)
             if hit:
+                blacklist_matched = True
                 tbl_row("Anthropic 147 黑名单", bad(f"命中（{hit}）"))
             else:
                 tbl_row("Anthropic 147 黑名单", ok("未命中"))
@@ -811,6 +827,8 @@ def main():
         suggestions.append(bad("! 时区不一致，建议调整"))
     elif tz_matched is None:
         suggestions.append(warn("- 时区无法比对"))
+    if blacklist_matched:
+        suggestions.append(bad("! 中转端点命中 Anthropic 黑名单，封号风险高，建议改官方直连或国产大模型"))
 
     if suggestions:
         tbl_row("结论和建议", suggestions[0])
@@ -819,11 +837,17 @@ def main():
     else:
         tbl_row("结论和建议", ok("各项正常，暂无可优化项"))
 
-    has_bad = (ipv6_leaked
-               or (risk_score is not None and risk_score >= 70)
-               or tz_matched is False)
-    tbl_row("综合结论", bad("当前环境 Claude 使用高风险")
-            if has_bad else ok("当前环境 Claude 使用低风险"))
+    has_bad = ((risk_score is not None and risk_score >= 70)
+               or blacklist_matched)
+    has_mid = (tz_matched is False
+               or spam_listed
+               or tun_active is not True)
+    if has_bad:
+        tbl_row("综合结论", bad("当前环境 Claude 使用高风险"))
+    elif has_mid:
+        tbl_row("综合结论", warn("当前环境 Claude 使用中风险"))
+    else:
+        tbl_row("综合结论", ok("当前环境 Claude 使用低风险"))
 
     tbl_bot()
 
