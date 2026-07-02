@@ -5,14 +5,14 @@
 
 ## 当前阶段
 
-已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,已发布版本 0.2.1。2026-07-01 对主面板做了一轮**大改**(字段语义重构 + 新增 Claude 检测块 + 结论合并 + 渲染修对齐/窄终端自适应,详见「最近验证」),**本地已跑通但尚未提交、未发新版**。同日另有附属独立脚本 `claude_expose_check.py`(Claude Code 暴露自检):因反蒸馏水印已在 2.1.198 移除,「水印自检 / 文本反向检测」两块已失效,**决定暂保留该文件**(不删不并入),主要留「遥测状态 / 服务端可见参数 / 敏感信息暴露」三块之后可能有用的逻辑,已在文件头和 CLAUDE.md 备注状态。当前重心:主面板改动待提交/发版、完善公开文档。字段语义以 `CLAUDE.md`「面板结构与字段语义」为准。
+已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,**已发布版本 0.3.0**(2026-07-01,PyPI 已上线 https://pypi.org/project/ai-ipcheck/0.3.0/ )。本轮相较 0.2.1 做了主面板大改(字段语义重构 + 新增 Claude 检测块 + 综合结论三档风险 + 渲染修对齐/窄终端自适应,详见「最近验证」),已全部提交并发布;**尚未 push 到 origin**。同日另有附属独立脚本 `claude_expose_check.py`(Claude Code 暴露自检):因反蒸馏水印已在 2.1.198 移除,「水印自检 / 文本反向检测」两块已失效,**决定暂保留该文件**(不删不并入),主要留「遥测状态 / 服务端可见参数 / 敏感信息暴露」三块之后可能有用的逻辑,已在文件头和 CLAUDE.md 备注状态。当前重心:主面板改动待提交/发版、完善公开文档。字段语义以 `CLAUDE.md`「面板结构与字段语义」为准。
 
 ## 已完成(已实现且已验证)
 
 > 说明:已发布到 PyPI 且 README 配有运行截图(`screenshot.png`),核心命令可运行可视为已验证;但仓库内未见自动化测试或运行日志沉淀,以下条目以「已发布 + 截图证据」为依据。
 
 - 单模块 CLI 工具落地:`src/ipcheck/cli.py` 集中全部逻辑,`pyproject.toml` 注册 `ipcheck` 命令,`python -m ipcheck` 入口可用
-- 已发布到 PyPI:包名 `ai-ipcheck`(`ipcheck` 被占),CLI 命令名 `ipcheck`,版本号到 0.2.1
+- 已发布到 PyPI:包名 `ai-ipcheck`(`ipcheck` 被占),CLI 命令名 `ipcheck`,版本号到 **0.3.0**
 - 公网信息检测:经 ip-api.com 获取出口 IP、国家/省份/城市、ISP、组织、代理/托管标记、公网时区
 - 本机网络检测:局域网 IPv4、IPv6 可用性、DNS 服务器(Windows/Unix/macOS 分别处理)及 DNS 服务商标注
 - 代理检测:环境变量代理(HTTP_PROXY/HTTPS_PROXY/ALL_PROXY)、macOS 系统代理(scutil)、TUN/VPN 启发式判断
@@ -43,6 +43,7 @@
 
 ## 最近验证
 
+- 2026-07-01 — **发布 0.3.0 到 PyPI**：版本号两处（`__init__.py` / `pyproject.toml`）同步升 0.2.1 → 0.3.0，`python -m build` 打包 + `twine check` 双产物 PASSED + `twine upload` 上线 https://pypi.org/project/ai-ipcheck/0.3.0/ 。本次为累积发布（含面板大改、Claude 检测块、综合结论三档风险、`claude_expose_check` 暴露自检脚本）。git 已提交至版本号 commit `811f136`，**尚未 push 到 origin**（本地领先 origin/main 6 个 commit）
 - 2026-07-01 — **综合结论改三档 高/中/低（本地跑通，未提交）**：在原「高/低」之间加**中风险**。`has_bad`（高，红）= IP 风险分≥70 / 命中黑名单；`has_mid`（中，黄，仅非高时判）= CLI 时区不一致 / 出口节点有投诉 / 没开 TUN，任一命中即中风险；都不命中才低风险。为拿「出口节点有投诉」信号，`get_stopforumspam()` 加第二返回值 `appears`（bool）。实测：时区不一致→中风险（黄）；命中黑名单+时区不一致→高风险（高优先于中）；当前环境（TUN 开、时区一致、未收录、66 分）→低风险。字段语义已同步 `CLAUDE.md` ⑥
 - 2026-07-01 — **`has_bad` 收窄为两条（本地跑通，未提交）**：移出「IPv6 泄露」「时区不一致」，综合高风险**只认** IP 风险分≥70 / 中转命中 147 黑名单。IPv6 与时区仍在「结论和建议」里红字提示，但不再拉高综合结论。实测当前环境（66 分中风险、无黑名单、时区一致）综合结论判低风险
 - 2026-07-01 — **Claude 检测块增强（本地跑通，未提交）**：① **中转命中 147 黑名单 → 综合结论直接高风险**——Claude 检测块新增 `blacklist_matched` 标志，命中时并入 `has_bad`，并在「结论和建议」补一条红字「中转端点命中 Anthropic 黑名单，封号风险高」；② **没装 CC 不再误报**——新增 `claude_installed()`（查 `~/.claude` 目录 / `~/.claude.json` / `which claude` 任一），未设 base url 时先分岔：装了→绿「官方直连（未设 ANTHROPIC_BASE_URL）」，没装→黄「未检测到 Claude Code（未安装或未使用）」。实测：场景 A（`ANTHROPIC_BASE_URL=api.88code.ai`）正确命中黑名单红字告警 + 综合结论高风险；`claude_installed()` mock 三分支（配置目录 / which / 全不命中）判定均正确。字段语义已同步 `CLAUDE.md` ⑤⑥
