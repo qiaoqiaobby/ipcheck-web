@@ -1,11 +1,11 @@
 # ip-check ROADMAP
 
 > 本项目真实进度源,记录当前阶段、已完成、进行中、待办、阻塞、最近验证。
-> 最后更新:2026-06-01
+> 最后更新:2026-07-01
 
 ## 当前阶段
 
-已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,版本 0.2.1,处于功能持续打磨阶段。最近一次改动是调整风险颜色分级:DNS 国内服务商、IP 标记为代理、机房托管由红色降为黄色提醒,综合结论仅 IPv6 泄露/风险分≥70/时区不一致才判高风险。当前重心在完善检测维度和公开文档。
+已发布的命令行工具 `ipcheck`(PyPI 包名 `ai-ipcheck`),单模块 CLI,已发布版本 0.2.1。2026-07-01 对主面板做了一轮**大改**(字段语义重构 + 新增 Claude 检测块 + 结论合并 + 渲染修对齐/窄终端自适应,详见「最近验证」),**本地已跑通但尚未提交、未发新版**。同日另新增附属独立脚本 `claude_expose_check.py`(Claude Code 暴露自检),独立跑通、尚未并入主命令。当前重心:主面板改动待提交/发版、决定 claude_expose_check 是否并入、完善公开文档。字段语义以 `CLAUDE.md`「面板结构与字段语义」为准。
 
 ## 已完成(已实现且已验证)
 
@@ -21,6 +21,9 @@
 - `ipcheck --version` 命令
 - 跨平台支持(macOS / Linux / Windows)与中英双语 README
 - 风险颜色分级调整:DNS 国内服务商、IP 标记为代理、机房托管降为黄色提醒(不再触发综合高风险);风险分查询保持 <30 绿/<70 黄/≥70 红
+- **Claude Code 暴露自检脚本 `claude_expose_check.py`**(2026-07-01,独立脚本,纯标准库):四模块——① 反蒸馏水印自检(复刻 `Crt`/`Zup`/`edp`,判 8 态)② 敏感信息暴露(非官方端点时列出经过第三方的 system prompt 字段)③ 遥测状态(复刻 `VAs()` 三级判定)④ 文本反向检测(扫四种水印撇号 + 斜杠日期)。名单从 Claude Code 二进制按解码器指纹**实时解码**(147 域名 + 11 关键词),跨版本不失效。四模块本地实测均通过
+- **水印存在性检测 + `--dump-data` 导出**(2026-07-01):`binary_watermark_status()` 用三特征(时区判断代码 / 撇号表 / XOR 解码器)判定二进制里水印在不在,区分 present / removed / obfuscation-changed;`--dump-data` 导出当前二进制的检测数据快照(147 域名 + 11 关键词 + 9 家公司映射 + 8 态参照,带时间戳)。已在 2.1.197(有水印,正常导出)与 2.1.198(已移除,正确识别)双版本验证
+- **第 5 模块「服务端可见参数」`--server-params`**(2026-07-01,可独立跑,也进完整自检):列出「删了客户端水印也删不掉」的识别信息——身份标识(账号 UUID / 组织 UUID / `userID` / `machineID` / 邮箱,读 `~/.claude.json` 脱敏显示)+ 请求头(`User-Agent=claude-cli/版本`、`x-app`、`X-Claude-Code-Session-Id`、`X-Stainless-OS/-Arch/-Runtime`、`anthropic-version/-beta`)+ 请求体(`metadata.user_id` 由 account_uuid + device_id + session_id 派生、`system`/`messages`/`tools`)。基于对 2.1.198 二进制请求构造的静态审计;OS/架构从本机 `platform` 读真实值
 
 ## 进行中
 
@@ -28,6 +31,8 @@
 
 ## 待办
 
+- `claude_expose_check.py` 是否并入主命令做 `ipcheck claude` 子命令(复用 `tbl_*` 表格渲染 + `IS_WIN` 跨平台逻辑);若并入需同步升版本、改 README。待主人确认方向
+- `claude_expose_check.py` 二级兜底:当前二进制找不到时回退名单仅 `["cn"]`(域名匹配退化);可选嵌入 147+11 快照做兜底,便于「没装 Claude 也能用」,代价是快照会随版本过期。待主人确认是否需要
 - 完善 MCP 使用体验与公开文档(来自 projects.json 的 nextStep;注意:MCP server 已于 commit 16bf65f 移除并重构为纯 CLI,此 nextStep 与当前代码状态不一致,需主人确认方向是否仍要 MCP)
 - 测试现状待澄清:CLAUDE.md 写「无测试」,但仓库存在 `tests/` 目录(mtime 2026-05-22),README 给出 `PYTHONPATH=src python -m unittest discover -s tests`;需确认测试是否真实存在并能跑通
 - 非 macOS 平台的系统代理检测(当前 `get_system_proxy()` 仅 macOS 实现,其他平台不判断)
@@ -38,6 +43,11 @@
 
 ## 最近验证
 
+- 2026-07-01 — **`ipcheck` 主面板大改（本地已跑通，未提交/未发版）**：字段语义重构——「本机真实 IP」= 国内直连回显（ip.3322.net）拿到的**真实公网 IP**（不是内网地址，此前一度误做成本地网卡枚举，已纠正）；「公网 IP」→「出口 IP」（VPN 代理出口）；新增「系统时区」+ CLI 时区全 IANA 化（读 /etc/localtime）；本地 DNS macOS 改优先 `networksetup` 手动 DNS；「机房/托管」→「机房/住宅」（机房 IP / 住宅 IP）；新增「Claude 检测」块（CLI 端点三态：官方直连 / 国产大模型无风险 / 中转红色告警 + Anthropic 147 黑名单命中，名单为冻结快照）；「结论分析+综合结论」合并为「结论和建议」（只列可优化项）+ 保留综合结论行。渲染层：**去 `✓✗⚠` 歧义宽度符号修右边框错位**、`fit_width()` 终端自适应、`_wrap_ansi()` 长值折行。字段语义已写入 `CLAUDE.md`「面板结构与字段语义」防再记错
+
+- 2026-07-01 — **重大发现:反蒸馏水印在 Claude Code 2.1.198 被移除**。逐版本核对二进制:2.1.196(6/29)、2.1.197(6/30)`currentDate:eca(KSe())` 水印函数仍在;2.1.198(7/01 18:04)`currentDate` 变回普通模板 `` `Today's date is ${ybe()}.` ``,`Asia/Shanghai`/`Asia/Urumqi`/四撇号/`replaceAll("-","/")`/XOR 解码器/labKw/cnTZ **全部归零**。公开曝光在 6/30,移除在 7/1,间隔约一天——Anthropic 未发声明,以代码静默移除作回应。`claude_expose_check.py` 已能正确识别 198 为「已移除」
+- 2026-07-01 — 第 5 模块「服务端可见参数」本地实测:`--server-params` 独立跑通,读 `~/.claude.json` 正确取出账号 UUID / 组织 UUID / userID / machineID / 邮箱并脱敏显示,`X-Stainless-OS/-Arch` 从本机读出 MacOS/arm64,`User-Agent` 取到 claude-cli/2.1.198;也已并进完整自检末尾。请求参数清单来自对 2.1.198 二进制的静态审计(确认 `metadata.user_id` 由 account_uuid+device_id+session_id 派生、自定义头 x-app/X-Claude-Code-Session-Id、X-Stainless-* 存在);**更正**早前 2.1.196 审计「x-stainless 全 0、未暴露 OS/架构」的结论——2.1.198 里这些头确实存在(强证据,待抓包终证)
+- 2026-07-01 — `claude_expose_check.py` 四模块本地实测通过:① 水印自检覆盖官方直连(不触发)+ 三种号商场景(`anyrouter.top` 命中 known+cnTZ → U+2019、`deepseek` 端点命中 labKw、`localhost`+香港时区演示绕过与港澳台排除)② 号商场景正确列出经过第三方的字段并告警 ③ 遥测正确识别本机 `essential-traffic` 最严档 ④ 文本反向检测三种输入(满水印/仅斜杠/干净)均判对。名单从本机 2.1.197 二进制实时解出 `XOR=91、解码器 Zla()、147 域名 + 11 关键词`
 - 2026-06-01 — 版本号升至 0.2.1 并打包发布到 PyPI(https://pypi.org/project/ai-ipcheck/0.2.1/);`twine check` 通过,whl + sdist 上传成功
 - 2026-06-01 — 风险颜色分级调整后运行 `PYTHONPATH=src python -m ipcheck` 验证通过:IP 标记为代理/机房托管显示黄色 `是 !`,风险分 66/100 显示黄色中风险,综合结论因无红线项判绿色低风险;DNS 国内服务商黄色因当前环境为 Cloudflare/Google 未触发实测,仅代码逻辑核对
 - 待确认 — 仓库内无测试运行日志或验证记录文件;此前代码改动为 git 提交 `5e687b5 Add system proxy and TUN detection`(README/CLAUDE.md mtime 2026-05-22),README 附有运行截图 `screenshot.png` 可作为命令可运行的间接证据,但无对应的逐项验证记录

@@ -12,7 +12,10 @@ import sys
 import subprocess
 import datetime
 import re
+import json
+import shutil
 import platform
+from urllib.parse import urlsplit
 
 import requests
 
@@ -150,29 +153,88 @@ def risk_color(score):
 
 
 # ── 表格渲染 ──────────────────────────────────────────────
-COL_LABEL, COL_VALUE = 18, 46
+COL_LABEL, COL_VALUE = 20, 46
+
+
+def fit_width():
+    """按终端宽度自适应值列宽（窄终端自动收窄，避免整框折行错位）。"""
+    global COL_VALUE
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        cols = 80
+    # 整框宽 = COL_LABEL + COL_VALUE + 9（缩进/边框/间隔）
+    COL_VALUE = max(20, min(46, cols - COL_LABEL - 9))
+
 
 def tbl_top(): print(f"  ╔{'═'*(COL_LABEL+2)}╤{'═'*(COL_VALUE+2)}╗")
 def tbl_sep(): print(f"  ╠{'═'*(COL_LABEL+2)}╪{'═'*(COL_VALUE+2)}╣")
 def tbl_bot(): print(f"  ╚{'═'*(COL_LABEL+2)}╧{'═'*(COL_VALUE+2)}╝")
 
 
-def tbl_row(label, value):
-    value = str(value)
+def _wrap_ansi(value, width):
+    """按可见显示宽度折行；ANSI 颜色码不计宽度、逐段保留（段尾 reset、段首重放当前色）。"""
+    segs, cur, w, active = [], '', 0, ''
+    i, n = 0, len(value)
+    while i < n:
+        m = ANSI_RE.match(value, i)
+        if m:
+            code = m.group(0)
+            cur += code
+            active = '' if code == C.RESET else code
+            i = m.end()
+            continue
+        cw = char_width(value[i])
+        if w + cw > width and w > 0:
+            segs.append(cur + (C.RESET if active else ''))
+            cur, w = active, 0
+        cur += value[i]
+        w += cw
+        i += 1
+    segs.append(cur + (C.RESET if active else ''))
+    return segs
+
+
+def _emit_cell(label, value):
     lpad = ' ' * max(0, COL_LABEL - display_len(label))
     vpad = ' ' * max(0, COL_VALUE - display_len(value))
     lstr = f"{label}{lpad}" if label else ' ' * COL_LABEL
     print(f"  ║ {lstr} │ {value}{vpad} ║")
 
 
+def tbl_row(label, value):
+    value = str(value)
+    if display_len(value) <= COL_VALUE:
+        _emit_cell(label, value)
+    else:
+        segs = _wrap_ansi(value, COL_VALUE)
+        _emit_cell(label, segs[0])
+        for s in segs[1:]:
+            _emit_cell('', s)
+
+
 # ── 数据采集 ─────────────────────────────────────────────
-def get_lan_ip():
+def get_real_public_ip():
+    """请求国内直连回显服务拿真实公网 IP。
+
+    规则代理（Clash 等）默认对国内 IP 走直连，请求国内回显服务会绕过 VPN，
+    露出真实 ISP 出口（而非代理出口）。探测失败返回 None。
+    """
+    for url in ("http://ip.3322.net", "https://4.ipw.cn"):
+        try:
+            ip = requests.get(url, timeout=6).text.strip()
+            if re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+                return ip
+        except Exception:
+            continue
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+        r = requests.get("https://myip.ipip.net", timeout=6)
+        m = re.search(r'当前\s*IP[：:]\s*([\d.]+)', r.text)
+        if m:
+            return m.group(1)
     except Exception:
-        return warn("获取失败")
+        pass
+    return None
 
 
 def get_ipv6():
@@ -185,6 +247,43 @@ def get_ipv6():
     except Exception:
         pass
     return None
+
+
+def _macos_manual_dns():
+    """macOS：用户在「系统设置 → 网络 → DNS」手动设置的 DNS。
+
+    遍历所有启用的网络服务，收集 networksetup 返回的 DNS（手动设置才会返回 IP，
+    未设置返回 "There aren't any..."）。不依赖 /etc/resolv.conf——避免被 Tailscale/VPN
+    顶掉主 resolver 时漏掉用户真正设的 DNS。没手动设返回 []。
+    """
+    servers = []
+    try:
+        lines = subprocess.run(
+            ['networksetup', '-listallnetworkservices'],
+            capture_output=True, text=True, timeout=4,
+        ).stdout.splitlines()[1:]  # 首行是说明文字
+    except Exception:
+        return []
+    for svc in lines:
+        svc = svc.strip()
+        if not svc or svc.startswith('*'):  # * 前缀 = 已禁用服务
+            continue
+        try:
+            out = subprocess.run(
+                ['networksetup', '-getdnsservers', svc],
+                capture_output=True, text=True, timeout=3,
+            ).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            line = line.strip()
+            try:
+                ipaddress.ip_address(line)
+                if line not in servers:
+                    servers.append(line)
+            except ValueError:
+                pass
+    return servers
 
 
 def get_dns_servers():
@@ -212,6 +311,11 @@ def get_dns_servers():
         except Exception:
             pass
     else:
+        # macOS：优先取用户手动设置的 DNS（不被 Tailscale/VPN 顶掉的 resolv.conf 掩盖）
+        if platform.system() == "Darwin":
+            manual = _macos_manual_dns()
+            if manual:
+                return manual
         try:
             seen = set()
             with open('/etc/resolv.conf') as f:
@@ -289,7 +393,7 @@ def get_stopforumspam(ip):
         )
         data = resp.json().get("ip", {})
         if not data.get("appears"):
-            return [ok("未收录  低风险 ✓")]
+            return [ok("未收录  低风险")]
         confidence = float(data.get("confidence", 0))
         frequency  = int(data.get("frequency", 0))
         last_seen  = (data.get("lastseen") or "")[:10]
@@ -405,11 +509,24 @@ def _utc_str(offset):
     return f"UTC{sign}{h:02d}:{r//60:02d}"
 
 
-def get_cli_tz_name():
-    tz_env = os.environ.get('TZ', '')
-    if tz_env:
-        return tz_env, True
-
+def get_system_tz():
+    """系统 IANA 时区（不受 $TZ 影响）。macOS/Linux 读 /etc/localtime 软链，取不到返回 None。"""
+    try:
+        p = "/etc/localtime"
+        if os.path.islink(p):
+            target = os.readlink(p)
+            if "zoneinfo/" in target:
+                return target.split("zoneinfo/", 1)[1]
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/etc/timezone"):
+            with open("/etc/timezone") as f:
+                name = f.read().strip()
+            if name:
+                return name
+    except Exception:
+        pass
     if IS_WIN:
         try:
             r = subprocess.run(
@@ -417,14 +534,112 @@ def get_cli_tz_name():
                  '[System.TimeZoneInfo]::Local.Id'],
                 capture_output=True, text=True, timeout=3, encoding='utf-8',
             )
-            win_id = r.stdout.strip()
-            if win_id:
-                return win_id, False
+            wid = r.stdout.strip()
+            if wid:
+                return wid
         except Exception:
             pass
+    return None
+
+
+def get_cli_tz_name():
+    tz_env = os.environ.get('TZ', '')
+    if tz_env:
+        return tz_env, True
+
+    # 未设 $TZ：CLI 继承系统时区，优先给 IANA 名（含 '/' 可精确比对）
+    sys_tz = get_system_tz()
+    if sys_tz:
+        return sys_tz, ('/' in sys_tz)
 
     name = datetime.datetime.now().astimezone().tzname() or "Unknown"
     return name, False
+
+
+# ── Claude 检测 ──────────────────────────────────────────
+def get_claude_base_url():
+    """CLI 的 ANTHROPIC_BASE_URL：shell 环境变量优先，再读 ~/.claude/settings.json 的 env。
+
+    返回 (url, source)；都没设返回 (None, None)。
+    """
+    shell = os.environ.get("ANTHROPIC_BASE_URL")
+    if shell:
+        return shell, "环境变量"
+    cfgdir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(cfgdir, name)) as f:
+                env = json.load(f).get("env") or {}
+            if env.get("ANTHROPIC_BASE_URL"):
+                return env["ANTHROPIC_BASE_URL"], "settings.json"
+        except Exception:
+            pass
+    return None, None
+
+
+def is_official_base(url):
+    """未设 或 host（含端口）== api.anthropic.com 视为官方（复刻 CC 的 Crt/Rrt）。"""
+    if not url:
+        return True
+    try:
+        sp = urlsplit(url)
+        host = (sp.hostname or "") + (f":{sp.port}" if sp.port else "")
+        return host.lower() == "api.anthropic.com"
+    except Exception:
+        return False
+
+
+# 国产大模型关键词：hostname 命中 → 判为国产替代（不经 Anthropic，无封号风险）
+DOMESTIC_MODEL_HINTS = [
+    "deepseek", "moonshot", "kimi", "minimax", "xaminim", "zhipu", "bigmodel",
+    "glm", "baichuan", "stepfun", "01ai", "lingyiwanwu", "dashscope", "qwen",
+    "tongyi", "volces", "volcengine", "doubao", "hunyuan", "wenxin", "ernie",
+    "iflytek", "spark", "sensenova",
+]
+
+
+def is_domestic_model(host):
+    """host 含国产大模型关键词 → 判为国产替代（启发式，宁可漏判为有风险）。"""
+    h = (host or "").lower()
+    return any(kw in h for kw in DOMESTIC_MODEL_HINTS)
+
+
+# 147 项域名黑名单快照：Anthropic 反蒸馏水印的 known 名单。
+# 2.1.198 已把名单从二进制移除，此为 2.1.197 解出的冻结快照。
+# 来源留底：fuxi/raw/2026-06-30-cc-反蒸馏水印审计/域名黑名单-147项.md
+_BLACKLIST_147 = (
+    "cn,sankuai.com,netease.com,163.com,baidu-int.com,baidu.com,alibaba-inc.com,alipay.com,"
+    "antgroup-inc.cn,kuaishou.com,bytedance.net,xiaohongshu.com,ctripcorp.com,jd.com,jdcloud.com,"
+    "bilibili.co,iflytek.com,stepfun-inc.com,aliyuncs.com,cn-shanghai.fcapp.run,cn-beijing.fcapp.run,"
+    "xaminim.com,moonshot.ai,anyrouter.top,packyapi.com,aicodemirror.com,aigocode.com,hongshan.com,"
+    "iwhalecloud.com,dhcoder.net,lemongpt.top,zhihuiapi.top,intsig.net,high-five-ai.xyz,cloudsway.net,"
+    "4sapi.com,529961.com,88996.cloud,88code.ai,88code.org,91code.pro,992236.xyz,ai.codeqaq.com,"
+    "ai.hybgzs.com,ai.kjvhh.com,aicanapi.com,aicoding.sh,aifast.site,aihubmix.com,anmory.com,"
+    "api.5202030.xyz,api.ablai.top,api.bianxie.ai,api.bltcy.ai,api.cpass.cc,api.dev88.tech,"
+    "api.dreamger.com,api.expansion.chat,api.gueai.com,api.holdai.top,api.ikuncode.cc,api.lconai.com,"
+    "api.linkapi.org,api.mkeai.com,api.nekoapi.com,api.oaipro.com,api.ruyun.fun,api.ssopen.top,"
+    "api.tu-zi.com,api.uglycat.cc,api.v3.cm,api.whatai.cc,api.wpgzs.top,api.xty.app,api.yuegle.com,"
+    "api.zzyu.me,apimart.ai,apipro.maynor1024.live,apiyi.com,applyj.hiapi.top,augmunt.com,b4u.qzz.io,"
+    "clauddy.com,claude-code-hub.app,claude-opus.top,claudeide.net,co.yes.vg,code.wenwen-ai.com,"
+    "code.x-aio.com,codeilab.com,cubence.com,deeprouter.top,dimaray.com,dmxapi.com,docs.aigc2d.com,"
+    "duckcoding.com,fk.hshwk.org,flapcode.com,foxcode.hshwk.org,foxcode.rjj.cc,fuli.hxi.me,getgoapi.com,"
+    "gpt.zhizengzeng.com,gptgod.cloud,gptkey.eu.org,gptpay.store,hdgsb.com,henapi.top,instcopilot-api.com,"
+    "jeniya.top,jiekou.ai,kg-api.cloud,n1n.ai,new-api.u4vr.com,new.xychatai.com,one-api.bltcy.top,"
+    "one.ocoolai.com,oneapi.paintbot.top,open.xiaojingai.com,openclaude.me,opus.gptuu.com,poloai.top,"
+    "poloapi.top,privnode.com,proxyai.com,qinzhiai.com,right.codes,runanytime.hxi.me,sssaicode.com,"
+    "store.zzyus.top,tiantianai.pro,uiuiapi.com,uniapi.ai,vip.undyingapi.com,wolfai.top,wzw.de5.net,"
+    "wzw.pp.ua,xairouter.com,xaixapi.com,xiaohuapi.site,xiaohumini.site,xy.poloapi.com,yansd666.com,"
+    "yansd666.top,yunwu.ai,yunwu.zeabur.app,zenmux.ai"
+).split(",")
+
+
+def blacklist_hit(host):
+    """host 精确或后缀命中 147 名单 → 返回命中项，否则 None（复刻水印 known 匹配）。"""
+    h = (host or "").lower()
+    for d in _BLACKLIST_147:
+        if h == d or h.endswith("." + d):
+            return d
+    return None
 
 
 # ── 主程序 ────────────────────────────────────────────────
@@ -434,6 +649,7 @@ def main():
         print(f"ipcheck {__version__}")
         return
 
+    fit_width()
     pub = get_public_info()
     pub_ok = pub.get("status") == "success"
 
@@ -442,17 +658,22 @@ def main():
     tbl_top()
 
     # 本机网络
-    tbl_row("局域网 IP", get_lan_ip())
+    real_ip = get_real_public_ip()
+    tbl_row("本机真实 IP", real_ip if real_ip else warn("探测失败（无国内直连）"))
     ipv6_addr = get_ipv6()
     ipv6_leaked = ipv6_addr is not None
-    tbl_row("IPv6 地址", ipv6_addr if ipv6_leaked else warn("已禁用"))
+    if ipv6_leaked:
+        tbl_row("IPv6 地址", warn(ipv6_addr))
+        tbl_row("", warn("建议禁用，避免暴露真实地址"))
+    else:
+        tbl_row("IPv6 地址", ok("已禁用"))
     dns = get_dns_servers()
     if dns:
-        tbl_row("DNS 服务器", dns_label(dns[0]))
+        tbl_row("本地 DNS", dns_label(dns[0]))
         for d in dns[1:]:
             tbl_row("", dns_label(d))
     else:
-        tbl_row("DNS 服务器", warn("获取失败"))
+        tbl_row("本地 DNS", warn("获取失败"))
     dns_cn = any("(CN)" in KNOWN_DNS.get(d, "") for d in dns)
 
     tbl_sep()
@@ -460,11 +681,11 @@ def main():
     # 公网信息
     if pub_ok:
         pub_ip = pub.get("query")
-        tbl_row("公网 IP",          pub_ip or bad("获取失败"))
+        tbl_row("出口 IP",          pub_ip or bad("获取失败"))
         tbl_row("国家 / 省份",      f"{_val(pub.get('country'))} / {_val(pub.get('regionName'))}")
         tbl_row("城市",              _val(pub.get("city")))
-        tbl_row("ISP(互联网服务商)", _val(pub.get("isp")))
-        tbl_row("组织",              _val(pub.get("org")))
+        tbl_row("运营商", _val(pub.get("isp")))
+        tbl_row("IP 归属",           _val(pub.get("org")))
         pub_tz_name = pub.get("timezone")
         if pub_tz_name:
             zi = make_zone(pub_tz_name)
@@ -490,25 +711,21 @@ def main():
         tbl_row("环境变量代理", ok("未设置"))
     system_proxy = get_system_proxy()
     if system_proxy:
-        tbl_row("系统代理", warn(system_proxy[0]))
-        for item in system_proxy[1:]:
-            tbl_row("", warn(item))
+        tbl_row("系统代理", warn("已开启"))
     elif system_proxy == []:
         tbl_row("系统代理", ok("未设置"))
     else:
         tbl_row("系统代理", warn("暂不支持检测"))
-    tun_active, tun_details = get_tun_vpn_status()
+    tun_active, _ = get_tun_vpn_status()
     if tun_active is True:
         tbl_row("TUN / VPN", warn("疑似开启"))
-        for item in tun_details:
-            tbl_row("", warn(item))
     elif tun_active is False:
         tbl_row("TUN / VPN", ok("未检测到"))
     else:
         tbl_row("TUN / VPN", warn("无法检测"))
     if pub_ok:
-        tbl_row("IP 标记为代理", warn("是 !") if pub.get("proxy")   else ok("否 ✓"))
-        tbl_row("机房 / 托管",   warn("是 !") if pub.get("hosting") else ok("否 ✓"))
+        tbl_row("IP 标记为代理", warn("是") if pub.get("proxy")   else ok("否"))
+        tbl_row("机房 / 住宅",   warn("机房 IP") if pub.get("hosting") else ok("住宅 IP"))
         if (pub.get("hosting") or pub.get("proxy")) and pub_ip:
             risk_display, risk_score = get_ip_risk(pub_ip)
             tbl_row("IP 风险查询",  risk_display)
@@ -523,6 +740,18 @@ def main():
     tz_matched = None
     cli_dt     = datetime.datetime.now().astimezone()
     cli_offset = cli_dt.utcoffset()
+
+    sys_tz = get_system_tz()
+    if sys_tz:
+        sys_zi = make_zone(sys_tz)
+        if sys_zi:
+            sys_off = datetime.datetime.now(sys_zi).utcoffset()
+            tbl_row("系统时区", f"{sys_tz}  ({_utc_str(sys_off)})")
+        else:
+            tbl_row("系统时区", sys_tz)
+    else:
+        tbl_row("系统时区", warn("未知"))
+
     tz_name, is_iana = get_cli_tz_name()
     tbl_row("CLI 时区", f"{tz_name}  ({_utc_str(cli_offset)})")
 
@@ -533,60 +762,76 @@ def main():
 
         if is_iana:
             tz_matched = tz_name == pub_tz_name
-            match = ok("一致 ✓") if tz_matched else bad("不一致 ✗")
+            match = ok("一致") if tz_matched else bad("不一致")
         elif pub_offset is not None:
             tz_matched = cli_offset == pub_offset
             if tz_matched:
                 match = warn("UTC 偏移一致（建议设置 $TZ=IANA 名称精确比对）")
             else:
-                match = bad("不一致 ✗（UTC 偏移不同）")
+                match = bad("不一致（UTC 偏移不同）")
         else:
             match = warn("无法比对（tzdata 未安装？pip install tzdata）")
         tbl_row("时区一致性", match)
 
     tbl_sep()
-    conclusions = []
-    if ipv6_leaked:
-        conclusions.append(bad("✗ IPv6 泄露，暴露真实地址"))
+
+    # Claude 检测（CLI）
+    claude_url, claude_src = get_claude_base_url()
+    if not claude_url:
+        tbl_row("CLI 端点", ok("官方直连（未设 ANTHROPIC_BASE_URL）"))
+    elif is_official_base(claude_url):
+        tbl_row("CLI 端点", ok("官方直连（api.anthropic.com）"))
     else:
-        conclusions.append(ok("✓ IPv6 已禁用，无泄露风险"))
-    if dns_cn:
-        conclusions.append(warn("! DNS 使用国内服务商，可能暴露真实位置"))
-    elif not dns:
-        conclusions.append(warn("- DNS 获取失败，无法评估"))
-    else:
-        conclusions.append(ok("✓ DNS 未检测到国内服务商"))
-    if not pub_ok:
-        conclusions.append(warn("- IP 信息获取失败，无法评估风险"))
-    elif pub.get("proxy") or pub.get("hosting"):
-        if risk_score is not None:
-            if risk_score < 30:
-                conclusions.append(ok(f"✓ IP 风险低（{risk_score}/100）"))
-            elif risk_score < 70:
-                conclusions.append(warn(f"! IP 风险中等（{risk_score}/100），建议关注"))
-            else:
-                conclusions.append(bad(f"✗ IP 风险高（{risk_score}/100），建议更换节点"))
+        claude_host = urlsplit(claude_url).hostname or claude_url
+        if is_domestic_model(claude_host):
+            tbl_row("CLI 端点", ok(claude_host))
+            tbl_row("", ok("疑似国产大模型，不经 Anthropic，无封号风险"))
         else:
-            conclusions.append(warn("! IP 为机房/代理，未查到风险分数"))
+            tbl_row("CLI 端点", bad(claude_host))
+            tbl_row("", bad("疑似中转，注意数据泄露风险"))
+            hit = blacklist_hit(claude_host)
+            if hit:
+                tbl_row("Anthropic 147 黑名单", bad(f"命中（{hit}）"))
+            else:
+                tbl_row("Anthropic 147 黑名单", ok("未命中"))
+
+    tbl_sep()
+    # 结论和建议：综合判定 + 只列可优化项（非绿色），正常项不提
+    suggestions = []
+    if ipv6_leaked:
+        suggestions.append(bad("! IPv6 泄露，暴露真实地址，建议禁用"))
+    if dns_cn:
+        suggestions.append(warn("! DNS 使用国内服务商，可能暴露真实位置"))
+    elif not dns:
+        suggestions.append(warn("- DNS 获取失败，无法评估"))
+    if not pub_ok:
+        suggestions.append(warn("- IP 信息获取失败，无法评估风险"))
+    elif pub.get("proxy") or pub.get("hosting"):
+        if risk_score is None:
+            suggestions.append(warn("! IP 为机房/代理，未查到风险分数"))
+        elif risk_score >= 70:
+            suggestions.append(bad(f"! IP 风险高（{risk_score}/100），建议更换节点"))
+        elif risk_score >= 30:
+            suggestions.append(warn(f"! IP 风险中等（{risk_score}/100），建议关注"))
+    if not (tun_active is True or (proxy_envs and system_proxy)):
+        suggestions.append(warn("! 代理可能不完整，建议开 TUN，或环境变量 + 系统代理都设"))
+    if tz_matched is False:
+        suggestions.append(bad("! 时区不一致，建议调整"))
+    elif tz_matched is None:
+        suggestions.append(warn("- 时区无法比对"))
+
+    if suggestions:
+        tbl_row("结论和建议", suggestions[0])
+        for s in suggestions[1:]:
+            tbl_row("", s)
     else:
-        conclusions.append(ok("✓ IP 正常，无风险标记"))
-    if tz_matched is True:
-        conclusions.append(ok("✓ 时区一致"))
-    elif tz_matched is False:
-        conclusions.append(bad("✗ 时区不一致，建议调整"))
-    else:
-        conclusions.append(warn("- 时区无法比对"))
+        tbl_row("结论和建议", ok("各项正常，暂无可优化项"))
+
     has_bad = (ipv6_leaked
                or (risk_score is not None and risk_score >= 70)
                or tz_matched is False)
-    tbl_row("结论分析", conclusions[0])
-    for c in conclusions[1:]:
-        tbl_row("", c)
-    tbl_sep()
-    if has_bad:
-        tbl_row("综合结论", bad("⚠ 当前环境 Claude 使用高风险"))
-    else:
-        tbl_row("综合结论", ok("✓ 当前环境 Claude 使用低风险"))
+    tbl_row("综合结论", bad("当前环境 Claude 使用高风险")
+            if has_bad else ok("当前环境 Claude 使用低风险"))
 
     tbl_bot()
 
