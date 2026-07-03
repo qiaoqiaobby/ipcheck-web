@@ -11,10 +11,15 @@
 解码失败时回退到内置快照（可能过期，会提示）。
 
 用法：
-  python3 claude_expose_check.py                 # 跑完整自检
+  python claude_expose_check.py                    # 全量文字报告 + 可视化报告图
+  python claude_expose_check.py --text             # 仅终端文字，不生成图
+  python claude_expose_check.py --show             # 文字报告 + 图，并在窗口预览
+  python claude_expose_check.py --output x.png     # 指定报告图输出路径
   python3 claude_expose_check.py --scan-file x   # 检测某文件文本里的水印
   echo "..." | python3 claude_expose_check.py --scan-stdin
   python3 claude_expose_check.py --binary <path> # 手动指定二进制
+
+可视化依赖：pip install matplotlib（未安装时自动回退为 SVG）
 
 诚实边界：这是基于本地「配置 + 二进制逻辑」的静态判断，只说明「按你的配置会发生什么」，
 不代表实际发出的字节。要 100% 坐实需要抓包（mitmproxy 等）。
@@ -39,6 +44,59 @@ import json
 import base64
 import argparse
 from urllib.parse import urlsplit
+
+
+def _win_utf8_console():
+    """Windows 控制台切换为 UTF-8 代码页 (65001)，避免中文/符号乱码。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+
+def _ensure_utf8_stdio():
+    """强制 stdout/stderr 使用 UTF-8，避免 Windows GBK 终端输出 emoji/中文时崩溃。"""
+    _win_utf8_console()
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def out(*args, **kwargs):
+    """统一终端输出；优先 UTF-8 字节写入，减少 Windows 下问号/乱码。"""
+    if kwargs:
+        file = kwargs.get("file", sys.stdout)
+        if file is not sys.stdout and file is not sys.stderr:
+            print(*args, **kwargs)
+            return
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    file = kwargs.get("file", sys.stdout)
+    text = sep.join(str(a) for a in args) + end
+    try:
+        file.write(text)
+        file.flush()
+    except (UnicodeEncodeError, AttributeError):
+        buf = getattr(file, "buffer", None)
+        if buf is not None:
+            buf.write(text.encode("utf-8", errors="replace"))
+            buf.flush()
+        else:
+            print(*args, **kwargs)
+
+
+def _safe_print(*args, **kwargs):
+    """兼容旧调用，转发到 out。"""
+    out(*args, **kwargs)
+
 
 # ---------- 颜色 ----------
 _NO_COLOR = bool(os.environ.get("NO_COLOR")) or not sys.stdout.isatty()
@@ -67,7 +125,7 @@ def bad(s):
 
 
 def head(s):
-    print(f"\n{C.BOLD}{s}{C.X}")
+    _safe_print(f"\n{C.BOLD}{s}{C.X}")
 
 
 # ---------- 撇号常量（edp 的四个返回值）----------
@@ -261,6 +319,7 @@ def get_base_url():
 
 # ---------- 时区（IANA 名，faithful to Intl.timeZone）----------
 def get_iana_tz():
+    """读取本机 IANA 时区名，兼容 macOS / Linux / Windows。"""
     tz = os.environ.get("TZ")
     if tz and "/" in tz:
         return tz
@@ -274,6 +333,14 @@ def get_iana_tz():
             return open("/etc/timezone").read().strip()
         except Exception:
             pass
+    try:
+        from datetime import datetime
+
+        tzinfo = datetime.now().astimezone().tzinfo
+        if tzinfo and hasattr(tzinfo, "key"):
+            return tzinfo.key
+    except Exception:
+        pass
     return None
 
 
@@ -311,6 +378,651 @@ def classify(host, domains, keywords, tz):
     cnTZ = tz in CN_TZ
     return known, labKw, cnTZ
 
+
+# ---------- 结构化采集（供可视化报告使用）----------
+def gather_watermark(base_url, domains, keywords, tz, status="present"):
+    """采集水印模块结论，返回 dict。"""
+    official = is_official(base_url)
+    host = js_hostname(base_url) if base_url else None
+    known = lab_kw = cn_tz = marked = False
+    apos_char = date_sep = summary = ""
+    level = "safe"
+
+    if status == "removed":
+        summary = "客户端水印已移除（2.1.198+）"
+        level = "safe"
+    elif official:
+        summary = "官方直连，客户端水印不触发"
+        level = "safe"
+    else:
+        known, lab_kw, cn_tz = classify(host, domains, keywords, tz)
+        marked = known or lab_kw or cn_tz
+        ch, cp, _ = APOS[(known, lab_kw)]
+        date_sep = "/" if cn_tz else "-"
+        apos_char = cp
+        if marked:
+            summary = f"非官方端点 + 可识别指纹（撇号 {cp}，日期 {date_sep}）"
+            level = "danger"
+        else:
+            summary = "非官方端点，但撇号/日期与官方基线不可区分"
+            level = "warn"
+
+    return {
+        "status": status,
+        "official": official,
+        "base_url": base_url,
+        "host": host,
+        "tz": tz,
+        "known": known,
+        "lab_kw": lab_kw,
+        "cn_tz": cn_tz,
+        "marked": marked,
+        "apos_char": apos_char,
+        "date_sep": date_sep,
+        "summary": summary,
+        "level": level,
+    }
+
+
+def gather_exposure(base_url):
+    """采集敏感信息暴露模块结论，返回 dict。"""
+    official = is_official(base_url)
+    cwd = os.getcwd()
+    in_git = os.path.isdir(os.path.join(cwd, ".git")) or _has_git_parent(cwd)
+    claudemd = None
+    for cand in (os.path.join(cwd, "CLAUDE.md"), os.path.expanduser("~/.claude/CLAUDE.md")):
+        if os.path.exists(cand):
+            claudemd = cand
+            break
+    email = _read_oauth_email()
+    fields = [
+        {"label": "工作目录路径", "value": cwd, "risk": 5, "note": "含用户名与项目结构"},
+        {"label": "Git 仓库", "value": "是" if in_git else "否", "risk": 4 if in_git else 1, "note": "会带改动文件名"},
+        {"label": "CLAUDE.md", "value": "有" if claudemd else "无", "risk": 4 if claudemd else 0, "note": "项目规范全文"},
+        {"label": "邮箱", "value": mask_email(email) if email else "未读到", "risk": 3 if email else 0, "note": ""},
+        {"label": "系统信息", "value": "OS / 平台 / Shell", "risk": 2, "note": ""},
+    ]
+    if official:
+        flow = "官方 Anthropic，字段仅发往官方"
+        level = "safe"
+    else:
+        flow = f"非官方端点 → 以上字段全部经过 {js_hostname(base_url) or '第三方'}"
+        level = "danger"
+    return {"official": official, "fields": fields, "flow": flow, "level": level}
+
+
+def gather_telemetry():
+    """采集遥测档位，返回 dict。"""
+    env = dict(os.environ)
+    sett = read_settings_env()
+
+    def getv(key):
+        return env.get(key) or sett.get(key)
+
+    ness = getv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+    tele = getv("DISABLE_TELEMETRY")
+    err = getv("DISABLE_ERROR_REPORTING")
+    dnt = getv("DO_NOT_TRACK")
+
+    if ness:
+        level, label, desc = "safe", "essential-traffic", "最严：只留必要推理请求"
+    elif tele:
+        level, label, desc = "warn", "no-telemetry", "运营指标关，Sentry 等可能仍在"
+    elif dnt:
+        level, label, desc = "warn", "do-not-track", "遵循 DNT，部分关闭"
+    else:
+        level, label, desc = "danger", "default", "默认开启，1479 种事件上报"
+
+    return {
+        "level": level,
+        "label": label,
+        "desc": desc,
+        "flags": {
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": ness,
+            "DISABLE_TELEMETRY": tele,
+            "DISABLE_ERROR_REPORTING": err,
+            "DO_NOT_TRACK": dnt,
+        },
+    }
+
+
+def gather_server_params(binary_override=None):
+    """采集服务端可见参数摘要，返回 dict。"""
+    d = _read_claude_json()
+    acc = d.get("oauthAccount") or {}
+    binary = find_binary(binary_override)
+    ver = os.path.basename(binary) if binary else "未知"
+    ids = [
+        ("账号 UUID", mask(acc.get("accountUuid"))),
+        ("组织 UUID", mask(acc.get("organizationUuid"))),
+        ("设备 ID", mask(d.get("userID"))),
+        ("机器 ID", mask(d.get("machineID"))),
+        ("邮箱", mask_email(acc.get("emailAddress"))),
+    ]
+    headers = [
+        f"User-Agent: claude-cli/{ver}",
+        f"X-Stainless-OS: {stainless_os()}",
+        f"X-Stainless-Arch: {stainless_arch()}",
+        "metadata.user_id（每次请求）",
+    ]
+    return {"version": ver, "ids": ids, "headers": headers, "level": "na"}
+
+
+def gather_report(binary_override=None):
+    """汇总四类检测，返回完整报告 dict。"""
+    from datetime import datetime
+
+    binary = find_binary(binary_override)
+    st = binary_watermark_status(binary)
+    domains = st["domains"] or _fallback_domains()
+    keywords = st["keywords"] or FALLBACK_KEYWORDS
+    base_url, source, _ = get_base_url()
+    tz = get_iana_tz()
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "binary": binary,
+        "binary_version": st["version"],
+        "watermark_binary_status": st["status"],
+        "watermark_binary_meta": st["meta"],
+        "domains": domains,
+        "keywords": keywords,
+        "base_url": base_url,
+        "base_url_source": source,
+        "watermark": gather_watermark(base_url, domains, keywords, tz, st["status"]),
+        "exposure": gather_exposure(base_url),
+        "telemetry": gather_telemetry(),
+        "server": gather_server_params(binary_override),
+    }
+
+
+# ---------- 可视化报告 ----------
+_LEVEL_COLOR = {"safe": "#22c55e", "warn": "#f59e0b", "danger": "#ef4444", "na": "#94a3b8"}
+_LEVEL_LABEL = {"safe": "低风险", "warn": "注意", "danger": "高风险", "na": "不适用"}
+
+
+def _setup_cjk_font():
+    """配置 matplotlib 中文字体，避免乱码。"""
+    from matplotlib import font_manager
+    import matplotlib.pyplot as plt
+
+    for name in (
+        "Microsoft YaHei", "PingFang SC", "SimHei",
+        "Noto Sans CJK SC", "Arial Unicode MS", "DejaVu Sans",
+    ):
+        if any(f.name == name for f in font_manager.fontManager.ttflist):
+            plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+def _overall_level(report):
+    """根据各模块档位计算总体风险等级。"""
+    order = {"safe": 0, "warn": 1, "danger": 2, "na": 0}
+    levels = [
+        report["watermark"]["level"],
+        report["exposure"]["level"],
+        report["telemetry"]["level"],
+        report["server"]["level"],
+    ]
+    worst = max(levels, key=lambda x: order.get(x, 0))
+    return worst
+
+
+def render_report_chart(report, output_path, show=False):
+    """将检测报告绘制成一张可读性强的 PNG 报告图。
+
+    优先使用 matplotlib 输出 PNG；未安装时自动回退为 SVG。
+    返回 (成功?, 输出路径或错误信息)。
+    """
+    try:
+        import matplotlib
+
+        if not show:
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.gridspec import GridSpec
+    except ImportError:
+        svg_path = output_path.rsplit(".", 1)[0] + ".svg" if "." in output_path else output_path + ".svg"
+        return render_report_svg(report, svg_path)
+
+    _setup_cjk_font()
+
+    overall = _overall_level(report)
+    ocolor = _LEVEL_COLOR[overall]
+    olbl = _LEVEL_LABEL[overall]
+
+    fig = plt.figure(figsize=(14, 10), facecolor="#f8fafc")
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[0.55, 1.2, 1.0], hspace=0.45, wspace=0.35)
+
+    # ── 标题栏 ──
+    ax_title = fig.add_subplot(gs[0, :])
+    ax_title.axis("off")
+    title = "Claude Code 暴露自检报告"
+    sub = (
+        f"生成时间 {report['generated_at']}"
+        f"  |  二进制 {report['binary_version'] or '未知'}"
+    )
+    if report["base_url"]:
+        sub += f"\nANTHROPIC_BASE_URL: {report['base_url']}"
+    ax_title.text(0.02, 0.72, title, fontsize=20, fontweight="bold", color="#0f172a", va="top")
+    ax_title.text(0.02, 0.28, sub, fontsize=10, color="#64748b", va="top")
+    badge = mpatches.FancyBboxPatch(
+        (0.78, 0.15), 0.19, 0.7, boxstyle="round,pad=0.02",
+        facecolor=ocolor, edgecolor="none", transform=ax_title.transAxes,
+    )
+    ax_title.add_patch(badge)
+    ax_title.text(0.875, 0.5, f"总体\n{olbl}", ha="center", va="center",
+                  fontsize=14, fontweight="bold", color="white", transform=ax_title.transAxes)
+
+    wm = report["watermark"]
+    exp = report["exposure"]
+    tel = report["telemetry"]
+
+    # ── 三卡片：水印 / 端点 / 遥测 ──
+    cards = [
+        (gs[1, 0], "[1] 客户端水印", wm["summary"], wm["level"],
+         [f"二进制: {report['watermark_binary_status']}",
+          f"known={'是' if wm['known'] else '否'}  labKw={'是' if wm['lab_kw'] else '否'}  cnTZ={'是' if wm['cn_tz'] else '否'}"]),
+        (gs[1, 1], "[2] API 端点", exp["flow"], exp["level"],
+         [f"端点: {'官方' if exp['official'] else '非官方'}",
+          f"域名: {wm['host'] or '（未设，官方默认）'}"]),
+        (gs[1, 2], "[3] 遥测档位", f"{tel['label']}\n{tel['desc']}", tel["level"],
+         [f"{k}: {v or '未设'}" for k, v in list(tel["flags"].items())[:2]]),
+    ]
+    for spec, card_title, body, level, foot in cards:
+        ax = fig.add_subplot(spec)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+        color = _LEVEL_COLOR[level]
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (0, 0), 1, 1, boxstyle="round,pad=0.02",
+            facecolor="white", edgecolor=color, linewidth=2.5, transform=ax.transAxes,
+        ))
+        ax.text(0.05, 0.92, card_title, fontsize=12, fontweight="bold", color="#0f172a",
+                va="top", transform=ax.transAxes)
+        ax.text(0.05, 0.62, body, fontsize=9.5, color="#334155", va="top",
+                wrap=True, transform=ax.transAxes)
+        for i, line in enumerate(foot):
+            ax.text(0.05, 0.22 - i * 0.1, line, fontsize=8, color="#64748b",
+                    va="top", transform=ax.transAxes)
+
+    # ── 敏感信息暴露条形图 ──
+    ax_bar = fig.add_subplot(gs[2, :2])
+    labels = [f["label"] for f in exp["fields"]]
+    risks = [f["risk"] for f in exp["fields"]]
+    bar_colors = ["#ef4444" if exp["level"] == "danger" else "#22c55e" for _ in risks]
+    if exp["level"] == "danger":
+        bar_colors = ["#fca5a5" if r >= 4 else "#fecaca" if r >= 2 else "#fee2e2" for r in risks]
+    else:
+        bar_colors = ["#bbf7d0" for _ in risks]
+    y_pos = range(len(labels))
+    ax_bar.barh(list(y_pos), risks, color=bar_colors, height=0.55, edgecolor="white")
+    ax_bar.set_yticks(list(y_pos))
+    ax_bar.set_yticklabels(labels, fontsize=10)
+    ax_bar.set_xlim(0, 6)
+    ax_bar.set_xlabel("敏感程度（相对值）", fontsize=9, color="#64748b")
+    ax_bar.set_title("[4] 敏感信息 (system prompt 会携带)", fontsize=12, fontweight="bold", loc="left")
+    ax_bar.spines["top"].set_visible(False)
+    ax_bar.spines["right"].set_visible(False)
+    for i, f in enumerate(exp["fields"]):
+        note = f["note"]
+        val = str(f["value"])
+        if len(val) > 36:
+            val = val[:33] + "..."
+        ax_bar.text(risks[i] + 0.08, i, f"{val}  {note}", va="center", fontsize=8, color="#475569")
+
+    # ── 服务端可见标识 ──
+    ax_srv = fig.add_subplot(gs[2, 2])
+    ax_srv.axis("off")
+    ax_srv.set_title("[5] 服务端可见 (删水印也删不掉)", fontsize=12, fontweight="bold", loc="left")
+    srv = report["server"]
+    lines = ["身份标识:"] + [f"  · {a}: {b}" for a, b in srv["ids"]]
+    lines += ["", "请求头 / 元数据:"] + [f"  · {h}" for h in srv["headers"]]
+    ax_srv.text(0.02, 0.98, "\n".join(lines), fontsize=8.5, color="#334155",
+                va="top", transform=ax_srv.transAxes)
+    ax_srv.add_patch(mpatches.FancyBboxPatch(
+        (0, 0), 1, 1, boxstyle="round,pad=0.02",
+        facecolor="#fff7ed", edgecolor="#fdba74", linewidth=1.5, transform=ax_srv.transAxes, zorder=-1,
+    ))
+
+    fig.text(
+        0.5, 0.01,
+        "静态审计：基于本地配置 + 二进制逻辑，不代表实际线上字节；100% 坐实需抓包。"
+        "  客户端水印移除 != 服务端不再识别你。",
+        ha="center", fontsize=8, color="#94a3b8",
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    if show:
+        plt.show()
+    plt.close(fig)
+    return True, os.path.abspath(output_path)
+
+
+def _svg_esc(text):
+    """转义 SVG 文本中的特殊字符。"""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def render_report_svg(report, output_path):
+    """无第三方依赖，输出 SVG 报告图（IDE 可直接预览）。"""
+    overall = _overall_level(report)
+    ocolor = _LEVEL_COLOR[overall]
+    olbl = _LEVEL_LABEL[overall]
+    wm = report["watermark"]
+    exp = report["exposure"]
+    tel = report["telemetry"]
+    srv = report["server"]
+
+    w, h = 960, 720
+    lines = [
+        f'<?xml version="1.0" encoding="UTF-8"?>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
+        f'<rect width="{w}" height="{h}" fill="#f8fafc"/>',
+        f'<text x="24" y="42" font-size="24" font-weight="bold" fill="#0f172a">Claude Code 暴露自检报告</text>',
+        f'<text x="24" y="68" font-size="12" fill="#64748b">'
+        f'生成 { _svg_esc(report["generated_at"]) } | 二进制 { _svg_esc(report["binary_version"] or "未知") }</text>',
+        f'<rect x="780" y="18" width="156" height="56" rx="10" fill="{ocolor}"/>',
+        f'<text x="858" y="42" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">总体</text>',
+        f'<text x="858" y="62" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">{_svg_esc(olbl)}</text>',
+    ]
+
+    cards = [
+        (24, 90, "① 客户端水印", wm["summary"], wm["level"],
+         [f"二进制: {report['watermark_binary_status']}",
+          f"known={'是' if wm['known'] else '否'} labKw={'是' if wm['lab_kw'] else '否'} cnTZ={'是' if wm['cn_tz'] else '否'}"]),
+        (334, 90, "② API 端点", exp["flow"], exp["level"],
+         [f"{'官方' if exp['official'] else '非官方'} | {wm['host'] or '默认官方'}"]),
+        (644, 90, "③ 遥测档位", f"{tel['label']} — {tel['desc']}", tel["level"], []),
+    ]
+    for x, y, title, body, level, foot in cards:
+        color = _LEVEL_COLOR[level]
+        lines.append(f'<rect x="{x}" y="{y}" width="292" height="150" rx="10" fill="#fff" stroke="{color}" stroke-width="2"/>')
+        lines.append(f'<text x="{x + 12}" y="{y + 28}" font-size="13" font-weight="bold" fill="#0f172a">{_svg_esc(title)}</text>')
+        for i, part in enumerate(_wrap_text(body, 28)[:3]):
+            lines.append(f'<text x="{x + 12}" y="{y + 52 + i * 18}" font-size="11" fill="#334155">{_svg_esc(part)}</text>')
+        for i, part in enumerate(foot):
+            lines.append(f'<text x="{x + 12}" y="{y + 118 + i * 16}" font-size="10" fill="#64748b">{_svg_esc(part)}</text>')
+
+    lines.append(f'<text x="24" y="268" font-size="14" font-weight="bold" fill="#0f172a">④ 敏感信息（system prompt 会携带）</text>')
+    for i, f in enumerate(exp["fields"]):
+        y = 292 + i * 36
+        bar_w = min(f["risk"] * 18, 90)
+        bar_c = "#ef4444" if exp["level"] == "danger" else "#22c55e"
+        lines.append(f'<text x="24" y="{y + 14}" font-size="11" fill="#334155">{_svg_esc(f["label"])}</text>')
+        lines.append(f'<rect x="130" y="{y}" width="{bar_w}" height="18" rx="4" fill="{bar_c}" opacity="0.75"/>')
+        val = str(f["value"])
+        if len(val) > 40:
+            val = val[:37] + "…"
+        lines.append(f'<text x="230" y="{y + 14}" font-size="10" fill="#475569">{_svg_esc(val)}</text>')
+
+    lines.append(f'<text x="520" y="268" font-size="14" font-weight="bold" fill="#0f172a">⑤ 服务端可见（删水印也删不掉）</text>')
+    lines.append(f'<rect x="520" y="280" width="416" height="200" rx="10" fill="#fff7ed" stroke="#fdba74"/>')
+    sy = 302
+    for label, val in srv["ids"]:
+        lines.append(f'<text x="536" y="{sy}" font-size="10" fill="#334155">{_svg_esc(label)}: {_svg_esc(val)}</text>')
+        sy += 18
+    sy += 8
+    for hdr in srv["headers"]:
+        lines.append(f'<text x="536" y="{sy}" font-size="10" fill="#334155">· {_svg_esc(hdr)}</text>')
+        sy += 18
+
+    if report["base_url"]:
+        lines.append(
+            f'<text x="24" y="520" font-size="11" fill="#64748b">'
+            f'ANTHROPIC_BASE_URL: {_svg_esc(report["base_url"])}</text>'
+        )
+    lines.append(
+        f'<text x="24" y="700" font-size="10" fill="#94a3b8">'
+        f'静态审计 · 不代表实际线上字节 · 100% 坐实需抓包 · 客户端水印移除 ≠ 服务端不再识别你</text>'
+    )
+    lines.append("</svg>")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return True, os.path.abspath(output_path)
+
+
+def _wrap_text(text, width):
+    """按字符宽度粗略换行，供 SVG 使用。"""
+    text = str(text).replace("\n", " ")
+    out, line = [], ""
+    for ch in text:
+        line += ch
+        if len(line) >= width:
+            out.append(line)
+            line = ""
+    if line:
+        out.append(line)
+    return out or [""]
+
+
+# ---------- 终端表格输出 ----------
+_RE_ANSI = re.compile(r"\033\[[0-9;]*m")
+_LEVEL_BADGE = {
+    "safe": lambda: ok("低"),
+    "warn": lambda: warn("注意"),
+    "danger": lambda: bad("高"),
+    "na": lambda: C.DIM + "信息" + C.X,
+}
+
+
+def _plain(s):
+    """去掉 ANSI 颜色码。"""
+    return _RE_ANSI.sub("", str(s))
+
+
+def _vis_len(s):
+    """估算终端显示宽度（CJK 计 2，ASCII 计 1）。"""
+    n = 0
+    for ch in _plain(s):
+        n += 2 if ord(ch) > 0x7F else 1
+    return n
+
+
+def _fit(s, max_w):
+    """按显示宽度截断过长文本。"""
+    s = _plain(s)
+    if _vis_len(s) <= max_w:
+        return s
+    out = []
+    w = 0
+    for ch in s:
+        cw = 2 if ord(ch) > 0x7F else 1
+        if w + cw > max_w - 3:
+            out.append("...")
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out)
+
+
+def _risk_badge(n):
+    """敏感程度徽章。"""
+    if n >= 4:
+        return bad("高")
+    if n >= 2:
+        return warn("中")
+    if n >= 1:
+        return ok("低")
+    return "-"
+
+
+def _flag_yes(v):
+    """是/否着色。"""
+    return ok("是") if v else ok("否")
+
+
+def _fmt_table(title, headers, rows, widths=None):
+    """渲染 ASCII 表格并输出到终端。"""
+    if not headers:
+        return
+    rows = rows or []
+    plain = [[_plain(h) for h in headers]] + [[_plain(c) for c in r] for r in rows]
+    ncol = len(headers)
+    if widths is None:
+        widths = []
+        for c in range(ncol):
+            w = max((_vis_len(r[c]) if c < len(r) else 0) for r in plain)
+            widths.append(min(max(w + 2, 6), 46 if c == len(headers) - 1 else 38))
+
+    def hline():
+        return "+" + "+".join("-" * w for w in widths) + "+"
+
+    def data_row(cells):
+        parts = []
+        for i, w in enumerate(widths):
+            cell = str(cells[i]) if i < len(cells) else ""
+            pad = w - _vis_len(cell)
+            parts.append(" " + cell + " " * max(pad, 0))
+        return "|" + "|".join(parts) + "|"
+
+    if title:
+        out("")
+        out(f"{C.BOLD}{title}{C.X}")
+    out(hline())
+    out(data_row(headers))
+    out(hline())
+    for row in rows:
+        out(data_row(row))
+    out(hline())
+
+
+def print_report_tables(report):
+    """以表格形式输出完整检测报告，突出结论与风险。"""
+    wm = report["watermark"]
+    exp = report["exposure"]
+    tel = report["telemetry"]
+    srv = report["server"]
+    overall = _overall_level(report)
+    overall_txt = {"safe": ok("低风险"), "warn": warn("需注意"), "danger": bad("高风险")}[overall]
+
+    out("")
+    out(f"{C.BOLD}{'=' * 72}{C.X}")
+    out(f"{C.BOLD}  Claude Code 暴露自检报告{C.X}  {C.DIM}{report['generated_at']}{C.X}")
+    out(f"{C.DIM}  二进制: {report['binary_version'] or '未知'}  |  "
+        f"水印二进制: {report['watermark_binary_status']}{C.X}")
+    if report["base_url"]:
+        out(f"{C.DIM}  ANTHROPIC_BASE_URL: {report['base_url']}  "
+            f"(来源: {report['base_url_source']}){C.X}")
+    out(f"{C.BOLD}{'=' * 72}{C.X}")
+
+    # ── 总览：一眼看重点 ──
+    wm_row = wm["summary"]
+    if wm["status"] == "removed":
+        wm_row = "已移除 (2.1.198+)"
+    exp_row = "官方 Anthropic" if exp["official"] else _fit(exp["flow"], 28)
+    _fmt_table(
+        "【总览】四项检查结论",
+        ["检查项", "结论", "风险"],
+        [
+            ["客户端水印", _fit(wm_row, 28), _LEVEL_BADGE[wm["level"]]()],
+            ["API 端点", "官方直连" if exp["official"] else f"非官方 ({wm['host'] or '-'})",
+             _LEVEL_BADGE[exp["level"]]()],
+            ["遥测档位", f"{tel['label']}", _LEVEL_BADGE[tel["level"]]()],
+            ["敏感数据流向", _fit(exp_row, 28), _LEVEL_BADGE[exp["level"]]()],
+        ],
+        widths=[14, 36, 8],
+    )
+    out(f"  >> 总体评估: {overall_txt}  |  "
+        f"{warn('[!]')} 客户端水印移除 != 服务端不再识别你")
+
+    # ── [1] 客户端水印 ──
+    wm_rows = [["二进制状态", report["watermark_binary_status"],
+                _fit(report["watermark_binary_meta"], 30)]]
+    if wm["status"] == "removed":
+        wm_rows.append(["客户端行为", "不再往 prompt 嵌撇号指纹", "-"])
+        wm_rows.append(["服务端提醒", "[!] 账号/IP/UA 仍可见", warn("注意")])
+    elif wm["official"]:
+        wm_rows.append(["端点", "未设或非官方改写为官方", ok("不触发")])
+    else:
+        wm_rows += [
+            ["端点 URL", _fit(wm["base_url"] or "-", 30), bad("非官方") if not wm["official"] else ok("官方")],
+            ["域名 known", _flag_yes(wm["known"]), "域名黑名单匹配"],
+            ["关键词 labKw", _flag_yes(wm["lab_kw"]), "AI 实验室关键词"],
+            ["时区 cnTZ", _flag_yes(wm["cn_tz"]), _fit(wm["tz"] or "未知", 20)],
+        ]
+        if wm["marked"]:
+            wm_rows.append(["指纹", f"撇号 {wm['apos_char']}  日期 {wm['date_sep']}", bad("已标记")])
+        else:
+            wm_rows.append(["指纹", "撇号/日期与官方不可区分", ok("未标记")])
+    _fmt_table("[1] 客户端水印", ["项目", "值", "状态"], wm_rows, widths=[14, 34, 10])
+
+    # ── [2] 敏感信息 ──
+    exp_rows = []
+    for f in exp["fields"]:
+        exp_rows.append([
+            f["label"],
+            _fit(str(f["value"]), 32),
+            _risk_badge(f["risk"]),
+            _fit(f["note"] or "-", 16),
+        ])
+    exp_rows.append(["数据流向", _fit(exp["flow"], 32),
+                     _LEVEL_BADGE[exp["level"]](), "-"])
+    _fmt_table(
+        "[2] 敏感信息 (system prompt 携带)",
+        ["字段", "当前值", "敏感度", "说明"],
+        exp_rows,
+        widths=[14, 34, 8, 16],
+    )
+    if not exp["official"]:
+        out(f"  {bad('[!] 重点')} 非官方端点: 用户名/项目结构/改动/规范全文均经第三方")
+
+    # ── [3] 遥测 ──
+    tel_rows = [
+        ["当前档位", tel["label"], _LEVEL_BADGE[tel["level"]]()],
+        ["说明", _fit(tel["desc"], 40), "-"],
+    ]
+    for k, v in tel["flags"].items():
+        short = k.replace("CLAUDE_CODE_", "").replace("DISABLE_", "")
+        tel_rows.append([short, v or "未设", ok("已开") if v else bad("未设")])
+    _fmt_table("[3] 遥测状态", ["项目", "值", "状态"], tel_rows, widths=[28, 22, 8])
+    if tel["level"] != "safe":
+        out(f"  {warn('[建议]')} settings.json env 加: "
+            f'"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"')
+
+    # ── [4] 服务端可见 ──
+    srv_rows = [[label, _fit(val, 40)] for label, val in srv["ids"]]
+    srv_rows.append(["---", "---"])
+    for hdr in srv["headers"]:
+        if ":" in hdr:
+            k, v = hdr.split(":", 1)
+            srv_rows.append([k.strip(), _fit(v.strip(), 40)])
+        else:
+            srv_rows.append([_fit(hdr, 20), "每次请求携带"])
+    srv_rows.append(["请求体 system", "工作目录/git/CLAUDE.md/OS/shell/邮箱"])
+    srv_rows.append(["请求体 messages", "对话、代码、工具结果"])
+    _fmt_table(
+        "[4] 服务端可见 (删水印也删不掉)",
+        ["项", "值 / 说明"],
+        srv_rows,
+        widths=[22, 46],
+    )
+    out(f"  {bad('[结论]')} 服务端凭 账号 + metadata.user_id + UA + X-Stainless 可稳定识别")
+
+    # ── 关键提示 ──
+    _fmt_table(
+        "【关键提示】",
+        ["#", "要点"],
+        [
+            ["1", "以上为本地配置+二进制静态审计，不代表实际线上字节"],
+            ["2", "100% 坐实需抓包 (mitmproxy 等)"],
+            ["3", "客户端水印移除 != 服务端不再识别你"],
+            ["4", "走非官方端点时，敏感信息泄露风险 > 水印指纹"],
+        ],
+        widths=[4, 64],
+    )
+    out("")
 
 # ========== 模块 1：水印状态 ==========
 def check_watermark(base_url, domains, keywords, tz, status="present"):
@@ -572,37 +1284,32 @@ def scan_text(text):
 
 
 # ---------- 主流程 ----------
-def full_check(binary_override):
-    print(f"{C.BOLD}═══ Claude Code 暴露自检 ═══{C.X}")
+def full_check(binary_override, *, text_only=False, output_path=None, show_chart=False):
+    """运行完整自检；默认同时输出全量格式化文字报告与可视化图。"""
+    report = gather_report(binary_override)
 
-    binary = find_binary(binary_override)
-    st = binary_watermark_status(binary)
-    if binary:
-        print(f"{C.DIM}二进制：{binary}（{st['version']}）{C.X}")
-    status = st["status"]
-    domains = st["domains"] or _fallback_domains()
-    keywords = st["keywords"] or FALLBACK_KEYWORDS
-    if status == "present":
-        print(f"{C.DIM}水印：{bad('存在')}，名单从二进制实时解码（{st['meta']}）{C.X}")
-    elif status == "removed":
-        print(f"{C.DIM}水印：{ok('已移除')}（{st['meta']}）{C.X}")
+    _print_text_report(report, binary_override)
+
+    if text_only:
+        return report
+
+    if output_path is None:
+        output_path = os.path.join(os.getcwd(), "claude_expose_report.png")
+
+    out("")
+    ok_chart, result = render_report_chart(report, output_path, show=show_chart)
+    if ok_chart:
+        out(f"报告图已保存: {result}")
+        if not show_chart:
+            out("提示: 在 IDE 中打开上述图片，或加 --show 在窗口预览。")
     else:
-        print(f"{warn('水印状态无法确认')}（{status}：{st['meta']}），非水印模块仍照常检测。")
+        out(f"{warn('[!] ' + result)}，未能生成报告图。")
+    return report
 
-    base_url, source, allsrc = get_base_url()
-    tz = get_iana_tz()
-    if base_url:
-        print(f"{C.DIM}ANTHROPIC_BASE_URL：{base_url}  （来源：{source}）{C.X}")
 
-    check_watermark(base_url, domains, keywords, tz, status)
-    check_exposure(base_url)
-    check_telemetry()
-    check_server_params(binary_override)
-
-    print()
-    print(f"{C.DIM}诚实边界：以上是基于本地配置 + 二进制逻辑的静态判断，只说明「客户端按你的配置会做"
-          f"什么」。服务端如何处理你的请求（是否用账号 / IP / 请求头 / 流量模式打标记，是否投毒）是"
-          f"黑盒，本工具看不到——{C.X}{warn('客户端水印移除 ≠ 服务端不再识别你')}{C.DIM}。100% 坐实需抓包。{C.X}")
+def _print_text_report(report, binary_override):
+    """终端表格版完整报告。"""
+    print_report_tables(report)
 
 
 def _fallback_domains():
@@ -660,6 +1367,7 @@ def dump_data(binary_override):
 
 
 def main():
+    _ensure_utf8_stdio()
     ap = argparse.ArgumentParser(description="Claude Code 暴露自检（本地静态）")
     ap.add_argument("--binary", help="手动指定 Claude Code 二进制路径")
     ap.add_argument("--scan-file", help="检测某文件文本里的水印")
@@ -667,6 +1375,9 @@ def main():
     ap.add_argument("--scan-text", help="直接传入一段文本做水印检测")
     ap.add_argument("--dump-data", action="store_true", help="导出当前二进制里的检测数据快照（147 域名 + 11 关键词 + 8 态）")
     ap.add_argument("--server-params", action="store_true", help="只看服务端可见参数（删了水印也删不掉的识别信息）")
+    ap.add_argument("--text", action="store_true", help="仅终端文字输出，不生成报告图")
+    ap.add_argument("--output", "-o", help="报告图输出路径（默认 ./claude_expose_report.png）")
+    ap.add_argument("--show", action="store_true", help="生成报告图并在窗口中预览")
     args = ap.parse_args()
 
     if args.server_params:
@@ -680,7 +1391,12 @@ def main():
     elif args.scan_text is not None:
         scan_text(args.scan_text)
     else:
-        full_check(args.binary)
+        full_check(
+            args.binary,
+            text_only=args.text,
+            output_path=args.output,
+            show_chart=args.show,
+        )
 
 
 if __name__ == "__main__":
